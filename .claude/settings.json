@@ -1,4 +1,24 @@
 {
+  "permissions": {
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./**/.env)",
+      "Read(./**/.env.*)",
+      "Edit(./.env)",
+      "Edit(./.env.*)",
+      "Edit(./**/.env)",
+      "Edit(./**/.env.*)",
+      "Read(./.git/**)",
+      "Edit(./.git/**)",
+      "Read(./**/secrets/**)",
+      "Edit(./**/secrets/**)",
+      "Read(./**/*.pem)",
+      "Read(./**/*.key)",
+      "Edit(./**/*.pem)",
+      "Edit(./**/*.key)"
+    ]
+  },
   "hooks": {
     "PreToolUse": [
       {
