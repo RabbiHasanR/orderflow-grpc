@@ -1,0 +1,11 @@
+# inventory-service dependencies
+# Django is used here purely as an ORM + migration system; the runtime server is
+# our own gRPC server (added in a later phase), not Django's web server.
+
+Django>=5.1,<6.0
+psycopg[binary]>=3.2          # PostgreSQL driver (psycopg3) for django.db.backends.postgresql
+
+# gRPC stack — used by the server/servicer phases, declared here as service deps.
+grpcio>=1.66
+grpcio-tools>=1.66            # protoc + plugins for regenerating stubs
+protobuf>=5.27
