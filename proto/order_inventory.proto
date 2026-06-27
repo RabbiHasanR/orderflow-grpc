@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+// Shared contract between order-service (gRPC client) and inventory-service
+// (gRPC server). Owned by neither service; generated into both. Edit this file,
+// then regenerate stubs with `bash scripts/regen_proto.sh` — never hand-edit the
+// generated output.
+package orderflow.inventory.v1;
+
+// The only RPC for now: the unary happy path described in workflow.md.
+// Streaming RPCs (live stock watch / bulk restock / interactive session) will be
+// added in a later phase.
+service InventoryService {
+  // Atomically reserve stock for an order, all-or-nothing. Maps 1:1 onto the
+  // inventory service layer's reserve_stock(order_ref, items) function.
+  rpc ReserveStock(ReserveStockRequest) returns (ReserveStockResponse);
+}
+
+// One requested line: reserve `quantity` of product `product_id`.
+message ReserveItem {
+  // Inventory product id. int64 to match Django's BigAutoField primary key.
+  int64 product_id = 1;
+  // Requested amount. int32 (not uint32) so a non-positive value can still be
+  // sent and rejected by the server's per-item validation.
+  int32 quantity = 2;
+}
+
+message ReserveStockRequest {
+  // The order-service order id this reservation is for — the cross-service
+  // reference stored on each StockReservation (no FK across services).
+  string order_ref = 1;
+  repeated ReserveItem items = 2;
+}
+
+// Per-item result. `reason` is empty when `reserved` is true.
+message ItemOutcome {
+  int64 product_id = 1;
+  bool reserved = 2;
+  string reason = 3;
+}
+
+message ReserveStockResponse {
+  // True only if every item was reserved; when false, nothing was persisted.
+  bool success = 1;
+  repeated ItemOutcome results = 2;
+}
