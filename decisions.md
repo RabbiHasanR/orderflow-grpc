@@ -117,6 +117,33 @@ dedicated one-shot migrate service is not needed yet.
 **Follow-up:** Re-introduce the 2nd replica + one-shot migrate service when
 building the load-balancing demo.
 
+### D-027 — Production-grade image: multi-stage, runtime-only deps, COPYed stubs
+**Date:** 2026-06-30
+**Decision:** Containerize inventory-service with a multi-stage Dockerfile that
+installs runtime deps into a venv in a builder stage and copies only that venv +
+app code into a slim non-root runtime. Split `requirements.txt` (runtime) from
+`requirements-dev.txt` (adds `grpcio-tools`); the image installs runtime-only.
+The `generated/` stubs are produced out-of-band by `regen_proto.sh` and COPYed
+in, not generated during the build. Healthcheck is a Python TCP connect to the
+gRPC port. Entrypoint runs `migrate` then `exec`s the server. See
+[spec 003](specs/003-inventory-containerization.md).
+**Why:** A runtime image should ship the minimum to *run*, not to *build* —
+no protobuf compiler (`grpcio-tools`), no pip cache, no toolchain, no root.
+`psycopg[binary]`/`grpcio` ship manylinux wheels, so no compiler is needed and
+the image stays small without `libpq-dev`. The build context is
+`./inventory-service`; `proto/` sits at the repo root *outside* it, and the
+documented workflow already generates stubs per-service — so COPYing them is the
+natural fit and avoids widening the context just to re-run protoc. `exec` makes
+the server PID 1's successor so the existing SIGTERM graceful-drain works. The
+server registers no gRPC health service, so a TCP probe is the honest
+no-extra-binary liveness check.
+**Alternatives:** Hermetic in-image stub generation (context = repo root +
+grpcio-tools in builder) — rejected: heavier, contradicts per-service regen flow.
+Single-stage slim image — works (wheels need no build deps) but still ships pip
+cache and is less clean than copying a prebuilt venv.
+**Scope:** inventory-service only; one replica (consistent with D-026). order-
+service image + 2nd replica + one-shot migrate job are later phases.
+
 ---
 
 ## order-service (FastAPI gRPC client) — planned, not yet built

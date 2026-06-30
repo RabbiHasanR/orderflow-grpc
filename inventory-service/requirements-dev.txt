@@ -1,0 +1,8 @@
+# inventory-service dev/tooling dependencies — NOT installed into the runtime image.
+# Install locally for stub regeneration: pip install -r requirements-dev.txt
+#   then: bash ../scripts/regen_proto.sh
+
+-r requirements.txt
+
+# protoc + plugins for regenerating gRPC stubs from proto/*.proto.
+grpcio-tools>=1.66

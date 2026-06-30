@@ -1,0 +1,47 @@
+# OrderFlow gRPC — Compose stack.
+#
+# SCOPE (this phase): only inventory-service and its database. order-service and
+# the 2nd inventory replica for round-robin (architecture goal #3) come later.
+#
+# Per the architecture: gRPC backends are INTERNAL ONLY — no host port is
+# published here. Only order-service:8000 will ever be published (future phase).
+# All secrets/config come from .env (see .env.example); nothing is hardcoded.
+
+services:
+  inventory-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-inventory}
+      POSTGRES_USER: ${POSTGRES_USER:-inventory}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - inventory-db-data:/var/lib/postgresql/data
+    healthcheck:
+      # Gate dependents until Postgres actually accepts connections.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-inventory} -d ${POSTGRES_DB:-inventory}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  inventory-service:
+    build:
+      context: ./inventory-service
+    # Single replica for now (D-026): migrations run in the entrypoint, so a 2nd
+    # replica would race `migrate`. Round-robin LB is a later phase.
+    env_file:
+      - .env
+    environment:
+      # DB connection — POSTGRES_HOST must match the service name above.
+      POSTGRES_HOST: inventory-db
+      POSTGRES_PORT: "5432"
+    depends_on:
+      inventory-db:
+        condition: service_healthy
+    # No `ports:` — the gRPC server stays internal to the compose network.
+    # Reachable as `inventory-service:50051` from other services on the network.
+    restart: unless-stopped
+
+volumes:
+  inventory-db-data:

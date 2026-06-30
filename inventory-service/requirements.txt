@@ -1,11 +1,13 @@
-# inventory-service dependencies
+# inventory-service runtime dependencies (what the container image ships).
 # Django is used here purely as an ORM + migration system; the runtime server is
-# our own gRPC server (added in a later phase), not Django's web server.
+# our own gRPC server, not Django's web server.
+#
+# Stub regeneration (grpcio-tools / protoc) is a DEV-time concern only and lives
+# in requirements-dev.txt — we never ship a protobuf compiler in the image.
 
 Django>=5.1,<6.0
-psycopg[binary]>=3.2          # PostgreSQL driver (psycopg3) for django.db.backends.postgresql
+psycopg[binary]>=3.2          # PostgreSQL driver (psycopg3); the binary wheel bundles libpq
 
-# gRPC stack — used by the server/servicer phases, declared here as service deps.
+# gRPC runtime — serving RPCs and the generated stubs depend on these.
 grpcio>=1.66
-grpcio-tools>=1.66            # protoc + plugins for regenerating stubs
 protobuf>=5.27
