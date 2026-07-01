@@ -168,3 +168,35 @@ for compose `depends_on`. The read endpoint is optional for v1.
 **Date:** 2026-06-24
 **Decision:** No throwaway stub server and no mock-based unit tests for the gRPC
 client yet; verify end-to-end once inventory-service exists (consequence of D-001).
+
+### D-033 — order-db schema via SQLAlchemy `create_all` (Alembic deferred)
+**Date:** 2026-07-01
+**Decision:** order-service creates its tables at startup with
+`Base.metadata.create_all` (run in the FastAPI lifespan). No Alembic for v1.
+**Why:** The schema is two tables (`orders`, `order_items`) and the service is a
+learning demo — a migration tool would be ceremony before there is any schema to
+migrate. `create_all` is idempotent and needs no extra process/entrypoint step.
+Alembic is the documented future path (parallel to inventory's Django migrations)
+for when the schema evolves and needs versioned, reversible changes.
+**Contrast:** inventory-service uses real Django migrations (D-025) because Django
+gives them for free and it already seeds data (`0002_seed_products`).
+**Alternatives:** Alembic now (premature); a migrate step in the entrypoint like
+inventory's (nothing to run without a migration tool).
+
+### D-034 — Shared gRPC auth metadata key, enforced server-side
+**Date:** 2026-07-01
+**Decision:** The auth token travels as call metadata under the key
+`x-auth-token`. The order-service client attaches it via a client-side
+interceptor; the inventory server verifies it via a server-side auth interceptor
+and aborts `UNAUTHENTICATED` on mismatch. If `GRPC_AUTH_TOKEN` is unset on the
+server, enforcement is skipped (dev fallback, matching the settings convention).
+**Why:** Interceptors keep auth out of the servicer/handlers (architecture §6).
+Metadata is gRPC's per-call header channel — the natural place for a bearer-style
+token, checked once at the edge of the server. A single shared constant on each
+side prevents the client attaching a header the server never reads.
+**Why not fail-closed when the server token is unset:** the whole stack must run
+locally without configuring a secret; once `GRPC_AUTH_TOKEN` is set (compose/prod)
+it is enforced. `UNAUTHENTICATED` maps to HTTP 502 at the client (a server-config
+fault, not the caller's) per workflow.md.
+**Alternatives:** channel-level call credentials (heavier, TLS-oriented — out of
+scope, no TLS in v1); no server-side check (token attached but meaningless).

@@ -1,0 +1,20 @@
+# order-service runtime dependencies (what the container image ships).
+# order-service is the public REST edge and a gRPC *client*. It is fully async
+# (decision D-030): async SQLAlchemy over asyncpg + grpc.aio, so no DB or RPC
+# call blocks the FastAPI event loop.
+#
+# Stub regeneration (grpcio-tools / protoc) is a DEV-time concern only and lives
+# in requirements-dev.txt — we never ship a protobuf compiler in the image.
+
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30      # ASGI server
+pydantic>=2.8
+pydantic-settings>=2.4       # env-driven Settings
+
+# Async DB stack (order-db).
+SQLAlchemy[asyncio]>=2.0
+asyncpg>=0.29                # native-async PostgreSQL driver
+
+# gRPC client runtime — the channel and the generated stubs depend on these.
+grpcio>=1.66
+protobuf>=5.27

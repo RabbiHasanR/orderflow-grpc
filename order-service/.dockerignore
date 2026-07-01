@@ -1,0 +1,45 @@
+# Keep the build context small and deterministic. Everything here is either
+# regenerated, host-only, or a secret — none of it belongs in the image.
+#
+# NOTE: app/generated/*_pb2*.py is intentionally NOT ignored — those stubs are
+# produced by scripts/regen_proto.sh and must ship in the image.
+
+# Python caches / bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments (deps are installed fresh in the builder stage)
+.venv/
+venv/
+env/
+ENV/
+
+# Dev-only tooling — image installs requirements.txt, never requirements-dev.txt
+requirements-dev.txt
+
+# Secrets / local env
+.env
+.env.*
+!.env.example
+
+# Test / coverage / type-check caches
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# Logs, SQLite, IDE/OS cruft
+*.log
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Docker artifacts themselves
+Dockerfile
+.dockerignore

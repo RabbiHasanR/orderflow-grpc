@@ -4,8 +4,8 @@ title: Order creation flow
 service: order-service
 status: in-progress
 created: 2026-06-29
-updated: 2026-06-29
-related: [architecture.md, "workflow.md", "proto/order_inventory.proto", "001-reserve-stock.md"]
+updated: 2026-07-01
+related: [architecture.md, "workflow.md", "proto/order_inventory.proto", "001-reserve-stock.md", "decisions.md#d-033", "decisions.md#d-034"]
 ---
 
 ## Context / Why
@@ -39,9 +39,16 @@ a foreign key. order-service is currently a stub; this spec covers building it.
 
 ## Design
 
-- FastAPI app + SQLAlchemy models on its own Postgres (order-db).
-- gRPC client built from the generated stubs in `order-service/app/generated/`.
-- Mirrors the server-side interceptor pattern from [001](001-reserve-stock.md).
+- FastAPI app + async SQLAlchemy (asyncpg, D-030) models on its own Postgres
+  (order-db). Tables created via `create_all` at startup (D-033); Alembic deferred.
+- gRPC client built from the generated stubs in `order-service/app/generated/`,
+  over a `grpc.aio` `round_robin` channel (D-034 for the shared auth metadata key).
+- Client-side auth interceptor attaches the token; inventory now enforces it with
+  a server-side auth + logging interceptor pair (built in this pass, D-034).
+- **`Order.total`/pricing is omitted** — the proto carries only `product_id` +
+  `quantity`, so there is no price data to total. A future field once a catalog/
+  pricing source exists; the `status` column is kept for future `PENDING`→
+  `CONFIRMED` saga states.
 - **Known gap (out of scope for v1):** reservation commits in inventory *before*
   the order is persisted; a failure after commit leaves an orphaned reservation.
   The future fix is a saga/outbox using the existing `StockReservation.RELEASED`
@@ -49,14 +56,22 @@ a foreign key. order-service is currently a stub; this spec covers building it.
 
 ## Tasks
 
-- [todo] FastAPI app skeleton + Pydantic order schema (`422` on bad body)
-- [todo] SQLAlchemy `Order` / `OrderItem` models + order-db wiring
-- [todo] gRPC client: round-robin channel over both replicas
-- [todo] client-side auth interceptor (attach `GRPC_AUTH_TOKEN`)
-- [todo] server-side auth + logging interceptors on inventory (shared with 001)
-- [todo] `POST /orders` handler: generate id → reserve → persist-or-map-error
-- [todo] failure mapping (`409` / `503` / `504` / `500`)
-- [todo] `docker-compose.yml` wiring + verify round-robin across replicas
+- [done] FastAPI app skeleton + Pydantic order schema (`422` on bad body)
+- [done] async SQLAlchemy `Order` / `OrderItem` models + order-db wiring
+- [done] gRPC client: `round_robin`-ready channel (single replica for now, D-026)
+- [done] client-side auth interceptor (attach `GRPC_AUTH_TOKEN`)
+- [done] server-side auth + logging interceptors on inventory (D-034)
+- [done] `POST /orders` handler: generate id → reserve → persist-or-map-error
+- [done] failure mapping (`409` / `503` / `504` / `502`)
+- [done] `docker-compose.yml` wiring (order-db + order-service, only 8000 published)
+- [todo] add 2nd inventory replica + one-shot migrate job; verify round-robin
+  across replicas (D-026 follow-up — channel is already round-robin-ready)
 
 ## Changelog
 - 2026-06-29 — created; scoped from workflow.md `[todo]` items. order-service is stub-only today.
+- 2026-07-01 — order-service built (app, async DB, gRPC client + interceptor);
+  inventory server-side auth+logging interceptors added; compose wired with
+  order-db + order-service. Decided single replica for now (D-026) with a
+  round-robin-ready channel, so round-robin verification is the one remaining
+  task. Added D-033 (create_all) and D-034 (shared auth metadata). Status stays
+  `in-progress` until the 2nd replica / round-robin demo lands.

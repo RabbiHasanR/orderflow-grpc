@@ -15,7 +15,7 @@ IDs are zero-padded 3-digit, mirroring the `D-NNN` scheme in `decisions.md`.
 | ID  | Title              | Service          | Status      | Summary                                              |
 |-----|--------------------|------------------|-------------|------------------------------------------------------|
 | [001](001-reserve-stock.md) | Reserve stock RPC  | inventory-service | done        | All-or-nothing `ReserveStock` over gRPC + service layer |
-| [002](002-order-creation.md) | Order creation flow | order-service    | in-progress | `POST /orders` fans out to `ReserveStock`, then persists |
+| [002](002-order-creation.md) | Order creation flow | order-service    | in-progress | `POST /orders` fans out to `ReserveStock`, then persists (built; round-robin demo pending) |
 | [003](003-inventory-containerization.md) | Inventory-service containerization | inventory-service | done | Production Dockerfile + Compose slice (inventory-db + inventory-service) |
 
 <!-- Next free ID: 004 -->

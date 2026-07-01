@@ -1,13 +1,17 @@
 # OrderFlow gRPC — Compose stack.
 #
-# SCOPE (this phase): only inventory-service and its database. order-service and
-# the 2nd inventory replica for round-robin (architecture goal #3) come later.
+# SCOPE (this phase): order-service (public REST edge, gRPC client) + its order-db,
+# plus the existing inventory-service (gRPC server) + inventory-db. Still a SINGLE
+# inventory replica (D-026); the 2nd replica + one-shot migrate job for the
+# round-robin demo come later. The client channel is already round_robin-ready, so
+# that is a runtime change (e.g. `--scale`), not a code change.
 #
-# Per the architecture: gRPC backends are INTERNAL ONLY — no host port is
-# published here. Only order-service:8000 will ever be published (future phase).
-# All secrets/config come from .env (see .env.example); nothing is hardcoded.
+# Per the architecture: gRPC backends are INTERNAL ONLY — only order-service:8000
+# is published to the host. All secrets/config come from .env (see .env.example);
+# nothing is hardcoded.
 
 services:
+  # --- inventory side (gRPC server) -------------------------------------------
   inventory-db:
     image: postgres:16-alpine
     environment:
@@ -43,5 +47,49 @@ services:
     # Reachable as `inventory-service:50051` from other services on the network.
     restart: unless-stopped
 
+  # --- order side (FastAPI REST edge, gRPC client) ----------------------------
+  order-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${ORDER_POSTGRES_DB:-orders}
+      POSTGRES_USER: ${ORDER_POSTGRES_USER:-orders}
+      POSTGRES_PASSWORD: ${ORDER_POSTGRES_PASSWORD:?ORDER_POSTGRES_PASSWORD is required}
+    volumes:
+      - order-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${ORDER_POSTGRES_USER:-orders} -d ${ORDER_POSTGRES_DB:-orders}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  order-service:
+    build:
+      context: ./order-service
+    # env_file supplies the shared GRPC_AUTH_TOKEN; the explicit `environment`
+    # below overrides POSTGRES_* so order-service talks to its OWN order-db (not
+    # inventory's) — compose `environment` wins over `env_file`.
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: order-db
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${ORDER_POSTGRES_DB:-orders}
+      POSTGRES_USER: ${ORDER_POSTGRES_USER:-orders}
+      POSTGRES_PASSWORD: ${ORDER_POSTGRES_PASSWORD:?ORDER_POSTGRES_PASSWORD is required}
+      # Client-side load balancing target(s). One replica today (D-026).
+      INVENTORY_GRPC_TARGETS: inventory-service:50051
+    ports:
+      # The ONLY host-published port in the whole stack (architecture §4).
+      - "8000:8000"
+    depends_on:
+      order-db:
+        condition: service_healthy
+      inventory-service:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   inventory-db-data:
+  order-db-data:

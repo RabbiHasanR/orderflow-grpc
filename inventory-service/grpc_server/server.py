@@ -35,11 +35,18 @@ def serve() -> None:
     from django.conf import settings
 
     from generated import order_inventory_pb2_grpc as pb2_grpc
+    from grpc_server.interceptors import AuthInterceptor, LoggingInterceptor
     from grpc_server.servicer import InventoryServicer
 
     # Sync server: each in-flight RPC runs on a pool thread, where blocking ORM
     # calls (select_for_update, transactions) are fine. (Decision D-021.)
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=settings.GRPC_MAX_WORKERS))
+    #
+    # Interceptor order = outermost first: Logging wraps Auth, so even calls
+    # rejected by Auth (UNAUTHENTICATED) are still logged with their status.
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=settings.GRPC_MAX_WORKERS),
+        interceptors=[LoggingInterceptor(), AuthInterceptor()],
+    )
     pb2_grpc.add_InventoryServiceServicer_to_server(InventoryServicer(), server)
 
     address = f"[::]:{settings.GRPC_PORT}"
