@@ -1,15 +1,9 @@
-"""gRPC servicer — the transport adapter for InventoryService.
+"""gRPC transport adapter for InventoryService.
 
-This is intentionally thin. It translates protobuf messages to/from the plain
-dataclasses understood by the service layer and routes the call into
-``inventory_app.services.reserve_stock``. All business logic — locking,
-transactions, all-or-nothing semantics — lives in the service layer, not here.
-
-Error model: expected *business* outcomes (insufficient stock, unknown product,
-non-positive quantity) are returned in the response body as ``success=False``
-with per-item reasons, because a batch may fail for several distinct reasons that
-a single gRPC status code could not express. gRPC error statuses are reserved for
-*malformed* requests (e.g. missing order_ref or no items → INVALID_ARGUMENT).
+Translates protobuf to/from the service-layer dataclasses; all business logic
+lives in ``inventory_app.services``. Business outcomes (insufficient stock,
+unknown product, non-positive quantity) are returned as ``success=False`` with
+per-item reasons; gRPC error statuses are reserved for malformed requests.
 """
 import grpc
 
@@ -26,16 +20,7 @@ class InventoryServicer(pb2_grpc.InventoryServiceServicer):
         request: pb2.ReserveStockRequest,
         context: grpc.ServicerContext,
     ) -> pb2.ReserveStockResponse:
-        """Adapt the request, run the reservation, and adapt the result back.
-
-        Args:
-            request: The incoming reservation request (order_ref + items).
-            context: The gRPC call context, used to abort on malformed input.
-
-        Returns:
-            A ``ReserveStockResponse`` whose ``success`` is True only if every
-            item was reserved.
-        """
+        """Adapt the request, run the reservation, and adapt the result back."""
         if not request.order_ref:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "order_ref is required")
         if not request.items:

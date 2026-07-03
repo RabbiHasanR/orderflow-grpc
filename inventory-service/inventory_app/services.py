@@ -1,20 +1,10 @@
 """Reservation business logic (the service layer).
 
-This module is deliberately framework-agnostic: it knows nothing about gRPC or
-protobuf. The gRPC servicer translates protobuf messages into the plain
-dataclasses below, calls :func:`reserve_stock`, and translates the result back.
-That keeps this logic unit-testable without standing up a gRPC server.
-
-Concurrency is the whole point of this service. Two orders can hit the inventory
-backend at the same time; without coordination they could both read the same
-``available_quantity`` and both "succeed", overselling the stock. We prevent that
-with ``select_for_update()`` (a row-level lock) inside a single
-``transaction.atomic()`` block: the second transaction blocks until the first
-commits or rolls back, so it sees the up-to-date quantity.
-
-Reservation is **all-or-nothing**: if any line item cannot be satisfied, the whole
-batch is rolled back and nothing is reserved — but we still report a per-item
-breakdown so the caller knows exactly which item failed and why.
+Framework-agnostic: no gRPC/protobuf here. Concurrency safety comes from
+``select_for_update()`` (row-level lock) inside ``transaction.atomic()``, so
+concurrent orders cannot both read the same quantity and oversell. Reservation
+is all-or-nothing: any unsatisfiable line rolls back the whole batch, but a
+per-item breakdown is still returned.
 """
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -52,23 +42,18 @@ class ReservationOutcome:
 def reserve_stock(order_ref: str, items: Sequence[ReserveItem]) -> ReservationOutcome:
     """Atomically reserve stock for an order, all-or-nothing.
 
-    For each item the product row is locked, checked, and (if sufficient)
-    decremented with a matching ``StockReservation`` row created. If *any* item
-    cannot be satisfied — unknown product, non-positive quantity, or insufficient
-    stock — the entire transaction is rolled back and ``success`` is False, while
-    ``results`` still reflects the per-item evaluation.
+    Each product row is locked, checked, and (if sufficient) decremented with a
+    matching ``StockReservation``. If any item fails — unknown product,
+    non-positive quantity, or insufficient stock — the transaction rolls back and
+    ``success`` is False, while ``results`` still reflects the per-item evaluation.
 
     Args:
-        order_ref: The order-service order id this reservation is for. Stored on
-            each ``StockReservation`` as the cross-service reference (no FK across
-            services).
-        items: The line items to reserve. Duplicate ``product_id`` values are
-            handled correctly because stock is decremented as we go, so a later
-            line sees the reduced balance.
+        order_ref: The order-service order id (cross-service reference, no FK).
+        items: Line items to reserve. Duplicate ``product_id`` values work because
+            stock is decremented as we go.
 
     Returns:
-        A :class:`ReservationOutcome`. When ``success`` is False, no rows were
-        persisted (the transaction was rolled back).
+        A :class:`ReservationOutcome`; when ``success`` is False no rows persist.
     """
     if not items:
         return ReservationOutcome(success=False, results=[])
@@ -86,8 +71,7 @@ def reserve_stock(order_ref: str, items: Sequence[ReserveItem]) -> ReservationOu
                 continue
 
             try:
-                # Row-level lock: blocks concurrent reservations of the same
-                # product until this transaction completes.
+                # Row-level lock until this transaction completes.
                 product = Product.objects.select_for_update().get(pk=item.product_id)
             except Product.DoesNotExist:
                 outcomes.append(ItemOutcome(item.product_id, False, "product not found"))
@@ -117,9 +101,7 @@ def reserve_stock(order_ref: str, items: Sequence[ReserveItem]) -> ReservationOu
             outcomes.append(ItemOutcome(item.product_id, True))
 
         if not all_ok:
-            # Roll back every decrement and reservation created above, but keep
-            # the computed per-item outcomes for the caller. Atomicity without
-            # losing the diagnostic detail.
+            # Roll back the decrements/reservations but keep the per-item outcomes.
             transaction.set_rollback(True)
 
     return ReservationOutcome(success=all_ok, results=outcomes)

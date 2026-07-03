@@ -1,13 +1,7 @@
-"""Standalone gRPC server entrypoint for the inventory-service.
+"""Standalone gRPC server entrypoint (``python -m grpc_server.server``).
 
-Run with ``python -m grpc_server.server`` (the container entrypoint does this
-after running migrations). This process — not Django's web server — is what the
-container runs.
-
-Boot order matters: we call ``django.setup()`` first to load settings and the app
-registry so the ORM is usable, and only *then* import the servicer (which
-transitively imports models). Importing models before ``django.setup()`` raises
-``AppRegistryNotReady``.
+``django.setup()` runs before importing the servicer so the app registry / ORM
+is ready; importing models earlier raises ``AppRegistryNotReady``.
 """
 import logging
 import os
@@ -38,11 +32,9 @@ def serve() -> None:
     from grpc_server.interceptors import AuthInterceptor, LoggingInterceptor
     from grpc_server.servicer import InventoryServicer
 
-    # Sync server: each in-flight RPC runs on a pool thread, where blocking ORM
-    # calls (select_for_update, transactions) are fine. (Decision D-021.)
-    #
-    # Interceptor order = outermost first: Logging wraps Auth, so even calls
-    # rejected by Auth (UNAUTHENTICATED) are still logged with their status.
+    # Sync server so blocking ORM calls run on pool threads (D-021). Interceptor
+    # order is outermost first: Logging wraps Auth, so Auth-rejected calls are
+    # still logged with their status.
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=settings.GRPC_MAX_WORKERS),
         interceptors=[LoggingInterceptor(), AuthInterceptor()],

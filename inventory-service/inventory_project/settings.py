@@ -1,11 +1,7 @@
-"""Django settings for the inventory-service.
+"""Django settings for the inventory-service (ORM + migrations only, no web server).
 
-Django is used here as an ORM + migration system only — there is no web server,
-no templates, and no contrib apps beyond what the ORM needs. The runtime is a
-standalone gRPC server (added in a later phase) that calls ``django.setup()``.
-
-All secrets and environment-specific values come from environment variables;
-nothing sensitive is hardcoded.
+The runtime is a standalone gRPC server that calls ``django.setup()``. All
+secrets and environment-specific values come from environment variables.
 """
 import os
 from pathlib import Path

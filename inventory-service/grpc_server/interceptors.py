@@ -1,16 +1,4 @@
-"""Server-side gRPC interceptors for the inventory-service.
-
-Interceptors are gRPC's middleware — the place for cross-cutting concerns so the
-servicer stays focused on business logic (architecture.md §6). Two are wired here:
-
-* :class:`AuthInterceptor` — rejects calls whose auth-token metadata is missing or
-  wrong (``UNAUTHENTICATED``). The order-service client attaches the token via its
-  own interceptor; the shared metadata key is ``x-auth-token`` (decision D-034).
-* :class:`LoggingInterceptor` — records method, peer, status and latency per RPC.
-
-Both are **synchronous** ``grpc.ServerInterceptor``s because inventory runs a sync
-``grpcio`` server (decision D-021), not ``grpc.aio``.
-"""
+"""Server-side gRPC interceptors: auth-token enforcement and per-RPC logging."""
 import logging
 import time
 
@@ -19,16 +7,12 @@ from django.conf import settings
 
 logger = logging.getLogger("inventory.grpc")
 
-# Shared with the order-service client interceptor (D-034). gRPC lower-cases
-# metadata keys; the ``x-`` prefix marks it a custom, non-reserved header.
+# Shared with the order-service client interceptor (D-034).
 AUTH_METADATA_KEY = "x-auth-token"
 
 
 def _abort_handler(code: grpc.StatusCode, details: str) -> grpc.RpcMethodHandler:
-    """Build a unary-unary handler that immediately aborts every call.
-
-    Used to short-circuit a rejected request without ever reaching the servicer.
-    """
+    """Build a unary-unary handler that immediately aborts every call."""
 
     def terminate(request: object, context: grpc.ServicerContext) -> None:
         context.abort(code, details)
@@ -39,9 +23,7 @@ def _abort_handler(code: grpc.StatusCode, details: str) -> grpc.RpcMethodHandler
 class AuthInterceptor(grpc.ServerInterceptor):
     """Reject RPCs that do not carry the expected auth token.
 
-    If ``GRPC_AUTH_TOKEN`` is unset on the server (local dev), enforcement is
-    skipped — mirroring the settings' dev fallbacks so the stack runs without a
-    token locally while staying secure once one is configured.
+    If ``GRPC_AUTH_TOKEN`` is unset (local dev), enforcement is skipped.
     """
 
     def __init__(self) -> None:

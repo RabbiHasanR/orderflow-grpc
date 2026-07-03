@@ -1,9 +1,7 @@
 """Inventory domain models.
 
-These map directly onto the inventory-service's own PostgreSQL database. The
-cross-service link to orders is **by reference only** (``StockReservation.order_ref``
-holds the order-service's order id) — there is no shared database and no foreign
-key across services. Consistency is coordinated over gRPC, not by the database.
+The cross-service link to orders is by reference only
+(``StockReservation.order_ref``) — no shared database, no FK across services.
 """
 from django.db import models
 
@@ -38,7 +36,6 @@ class StockReservation(models.Model):
         on_delete=models.PROTECT,
         related_name="reservations",
     )
-    # The order-service order id — the cross-service reference (no FK across services).
     order_ref = models.CharField(max_length=128, db_index=True)
     quantity = models.PositiveIntegerField()
     status = models.CharField(
