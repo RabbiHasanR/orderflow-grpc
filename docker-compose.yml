@@ -10,6 +10,7 @@
 # is published to the host. All secrets/config come from .env (see .env.example);
 # nothing is hardcoded.
 
+
 services:
   # --- inventory side (gRPC server) -------------------------------------------
   inventory-db:
