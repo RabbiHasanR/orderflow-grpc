@@ -1,14 +1,7 @@
 """SQLAlchemy models for order-service (its own order-db).
 
-The link to inventory's products is **by reference only** — ``OrderItem.product_id``
-holds inventory's ``Product.id``, but there is no foreign key across services and
-no shared database. Consistency is coordinated over gRPC (the reservation result),
-not by the database. This is the core distributed-systems lesson of the project.
-
-An order is persisted **only after** its stock reservation succeeds (see
-architecture.md's happy path), so a persisted row is effectively ``CONFIRMED``.
-The ``status`` column is kept for the future saga/outbox work (``PENDING`` →
-``CONFIRMED``/``CANCELLED``) that would close the orphaned-reservation gap.
+``OrderItem.product_id`` references inventory's ``Product.id`` by value only —
+no cross-service foreign key, no shared database.
 """
 from datetime import datetime
 from uuid import uuid4
@@ -29,9 +22,9 @@ class Order(Base):
 
     __tablename__ = "orders"
 
-    # Generated up front (UUID) so it can be passed as order_ref *before* the
-    # reservation RPC — inventory stores it on each StockReservation.
+    # Generated up front so it can be passed as order_ref before the RPC.
     id: Mapped[str] = mapped_column(primary_key=True, default=_new_order_id)
+    # status kept for future saga/outbox work (PENDING → CONFIRMED/CANCELLED).
     status: Mapped[str] = mapped_column(default="CONFIRMED")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -51,8 +44,7 @@ class OrderItem(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     order_id: Mapped[str] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"))
-    # Inventory's Product.id — cross-service reference, no FK across databases.
-    product_id: Mapped[int] = mapped_column()
+    product_id: Mapped[int] = mapped_column()  # inventory's Product.id, no cross-DB FK
     quantity: Mapped[int] = mapped_column()
 
     order: Mapped["Order"] = relationship(back_populates="items")

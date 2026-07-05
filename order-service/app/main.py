@@ -1,20 +1,8 @@
 """FastAPI app — the public REST edge of OrderFlow.
 
-A single ``POST /orders`` **fans out** over gRPC to inventory's ``ReserveStock``
-and only persists the order if the reservation succeeds. The two services own
-separate databases; there is no distributed transaction — consistency is
-coordinated by the reservation *result*, not a foreign key (see workflow.md).
-
-Failure mapping (workflow.md → HTTP):
-  * bad body ............. Pydantic → 422 (before any hop)
-  * success == False ..... 409 + per-item reasons (RPC still OK; a business no)
-  * UNAVAILABLE .......... 503 (backend unreachable)
-  * DEADLINE_EXCEEDED .... 504 (RPC deadline)
-  * UNAUTHENTICATED ...... 502 (our token is wrong — a server-config problem)
-
-Known v1 gap (spec 002): the reservation commits in inventory *before* the order
-is persisted here, so a failure after commit orphans a reservation. The future
-fix is a saga/outbox using inventory's ``StockReservation.RELEASED`` status.
+``POST /orders`` fans out over gRPC to inventory's ``ReserveStock`` and persists
+the order only if the reservation succeeds. Separate DBs, no distributed
+transaction — consistency is coordinated by the reservation result (workflow.md).
 """
 import logging
 from contextlib import asynccontextmanager
@@ -33,8 +21,7 @@ from app.schemas import ItemResultOut, OrderCreate, OrderOut
 
 logger = logging.getLogger("order.api")
 
-# gRPC status → HTTP status. Anything unlisted falls back to 502 (a broken hop is
-# an upstream/config fault, not the client's).
+# gRPC status → HTTP status; anything unlisted falls back to 502.
 _GRPC_TO_HTTP = {
     grpc.StatusCode.UNAVAILABLE: status.HTTP_503_SERVICE_UNAVAILABLE,
     grpc.StatusCode.DEADLINE_EXCEEDED: status.HTTP_504_GATEWAY_TIMEOUT,
@@ -50,7 +37,7 @@ async def lifespan(app: FastAPI):
     )
     settings = get_settings()
 
-    await init_models()  # D-033: create_all at startup (no Alembic for v1)
+    await init_models()  # D-033: create_all at startup, no Alembic for v1
 
     channel = build_channel(settings)
     app.state.inventory = InventoryClient(channel, settings.grpc_deadline_seconds)
@@ -82,24 +69,9 @@ async def create_order(
     session: Annotated[AsyncSession, Depends(get_session)],
     inventory: Annotated[InventoryClient, Depends(get_inventory)],
 ) -> Order:
-    """Reserve stock over gRPC, then persist the order only if it succeeded.
-
-    Args:
-        payload: Validated order body (non-empty items, positive fields).
-        session: Async DB session for order-db.
-        inventory: gRPC client to inventory-service.
-
-    Returns:
-        The persisted :class:`Order` (serialized as :class:`OrderOut`).
-
-    Raises:
-        HTTPException: ``409`` if any item cannot be reserved; ``503/504/502`` on
-            a gRPC transport/status failure.
-    """
-    # Generate the id up front: it is the order_ref inventory stores per
-    # reservation, and it must exist *before* the RPC (workflow.md step 3). We set
-    # it explicitly rather than relying on the model's column default, which only
-    # fires at INSERT-flush time — after the RPC.
+    """Reserve stock over gRPC, then persist the order only if it succeeded."""
+    # Generate the id up front: it is the order_ref inventory stores, and must
+    # exist before the RPC (workflow.md step 3).
     order_ref = str(uuid4())
     order = Order(
         id=order_ref,
@@ -115,8 +87,7 @@ async def create_order(
         raise HTTPException(status_code=http_status, detail=f"inventory unavailable: {exc.code().name}")
 
     if not response.success:
-        # Business rejection (insufficient stock / unknown product / bad qty). The
-        # RPC itself was OK; nothing was persisted on either side.
+        # Business rejection: RPC was OK, nothing persisted on either side.
         reasons = [
             ItemResultOut(product_id=r.product_id, reserved=r.reserved, reason=r.reason).model_dump()
             for r in response.results
@@ -138,18 +109,7 @@ async def get_order(
     order_id: str,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> Order:
-    """Read back a persisted order (makes the service demonstrable without psql).
-
-    Args:
-        order_id: The order id (UUID string) returned by ``POST /orders``.
-        session: Async DB session for order-db.
-
-    Returns:
-        The matching :class:`Order`.
-
-    Raises:
-        HTTPException: ``404`` if no order has that id.
-    """
+    """Read back a persisted order by id; ``404`` if not found."""
     order = await session.get(Order, order_id)
     if order is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
