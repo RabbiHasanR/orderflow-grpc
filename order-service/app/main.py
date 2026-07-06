@@ -1,43 +1,30 @@
 """FastAPI app — the public REST edge of OrderFlow.
 
-``POST /orders`` fans out over gRPC to inventory's ``ReserveStock`` and persists
-the order only if the reservation succeeds. Separate DBs, no distributed
-transaction — consistency is coordinated by the reservation result (workflow.md).
+The app is a gRPC *client*: it opens one shared round-robin channel to
+inventory-service in the lifespan and exposes it via ``app.state`` for request
+handlers. Schema is managed by Alembic (``alembic upgrade head`` in the
+entrypoint), not by the app — see decisions.md.
 """
 import logging
 from contextlib import asynccontextmanager
-from typing import Annotated
-from uuid import uuid4
 
-import grpc
-from fastapi import Depends, FastAPI, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import FastAPI
 
-from app.config import get_settings
-from app.db import engine, get_session, init_models
+from app.api.api_v1 import api_router
+from app.core.config import get_settings
+from app.core.database import engine
 from app.grpc_client.client import InventoryClient, build_channel
-from app.models import Order, OrderItem
-from app.schemas import ItemResultOut, OrderCreate, OrderOut
 
 logger = logging.getLogger("order.api")
-
-# gRPC status → HTTP status; anything unlisted falls back to 502.
-_GRPC_TO_HTTP = {
-    grpc.StatusCode.UNAVAILABLE: status.HTTP_503_SERVICE_UNAVAILABLE,
-    grpc.StatusCode.DEADLINE_EXCEEDED: status.HTTP_504_GATEWAY_TIMEOUT,
-    grpc.StatusCode.UNAUTHENTICATED: status.HTTP_502_BAD_GATEWAY,
-}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Create tables and open the shared gRPC channel; tear both down on exit."""
+    """Open the shared gRPC channel on startup; tear it and the DB engine down on exit."""
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
     settings = get_settings()
-
-    await init_models()  # D-033: create_all at startup, no Alembic for v1
 
     channel = build_channel(settings)
     app.state.inventory = InventoryClient(channel, settings.grpc_deadline_seconds)
@@ -52,65 +39,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="OrderFlow — order-service", lifespan=lifespan)
 
 
-def get_inventory() -> InventoryClient:
-    """FastAPI dependency returning the process-wide inventory gRPC client."""
-    return app.state.inventory
-
-
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     """Liveness probe for compose ``depends_on`` / the container healthcheck."""
     return {"status": "ok"}
 
 
-@app.post("/orders", response_model=OrderOut, status_code=status.HTTP_201_CREATED)
-async def create_order(
-    payload: OrderCreate,
-    session: Annotated[AsyncSession, Depends(get_session)],
-    inventory: Annotated[InventoryClient, Depends(get_inventory)],
-) -> Order:
-    """Reserve stock over gRPC, then persist the order only if it succeeded."""
-    # Generate the id up front: it is the order_ref inventory stores, and must
-    # exist before the RPC (workflow.md step 3).
-    order_ref = str(uuid4())
-    order = Order(
-        id=order_ref,
-        items=[OrderItem(product_id=i.product_id, quantity=i.quantity) for i in payload.items],
-    )
-    line_items = [(i.product_id, i.quantity) for i in payload.items]
-
-    try:
-        response = await inventory.reserve_stock(order_ref=order_ref, items=line_items)
-    except grpc.aio.AioRpcError as exc:
-        http_status = _GRPC_TO_HTTP.get(exc.code(), status.HTTP_502_BAD_GATEWAY)
-        logger.warning("ReserveStock failed: %s → HTTP %s", exc.code(), http_status)
-        raise HTTPException(status_code=http_status, detail=f"inventory unavailable: {exc.code().name}")
-
-    if not response.success:
-        # Business rejection: RPC was OK, nothing persisted on either side.
-        reasons = [
-            ItemResultOut(product_id=r.product_id, reserved=r.reserved, reason=r.reason).model_dump()
-            for r in response.results
-        ]
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={"message": "stock reservation failed", "results": reasons},
-        )
-
-    session.add(order)
-    await session.commit()
-    await session.refresh(order)
-    logger.info("order %s created (%d items)", order.id, len(line_items))
-    return order
-
-
-@app.get("/orders/{order_id}", response_model=OrderOut)
-async def get_order(
-    order_id: str,
-    session: Annotated[AsyncSession, Depends(get_session)],
-) -> Order:
-    """Read back a persisted order by id; ``404`` if not found."""
-    order = await session.get(Order, order_id)
-    if order is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
-    return order
+app.include_router(api_router)

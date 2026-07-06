@@ -40,7 +40,9 @@ a foreign key. order-service is currently a stub; this spec covers building it.
 ## Design
 
 - FastAPI app + async SQLAlchemy (asyncpg, D-030) models on its own Postgres
-  (order-db). Tables created via `create_all` at startup (D-033); Alembic deferred.
+  (order-db). Schema managed by Alembic, `alembic upgrade head` in the entrypoint
+  (D-035, supersedes the original startup `create_all` of D-033). The code layout
+  moved to domain modules — see spec [004](004-order-service-restructure.md).
 - gRPC client built from the generated stubs in `order-service/app/generated/`,
   over a `grpc.aio` `round_robin` channel (D-034 for the shared auth metadata key).
 - Client-side auth interceptor attaches the token; inventory now enforces it with

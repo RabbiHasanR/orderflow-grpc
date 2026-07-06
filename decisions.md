@@ -171,6 +171,7 @@ client yet; verify end-to-end once inventory-service exists (consequence of D-00
 
 ### D-033 — order-db schema via SQLAlchemy `create_all` (Alembic deferred)
 **Date:** 2026-07-01
+**Status:** Superseded by D-035 (2026-07-06) — Alembic now manages the schema.
 **Decision:** order-service creates its tables at startup with
 `Base.metadata.create_all` (run in the FastAPI lifespan). No Alembic for v1.
 **Why:** The schema is two tables (`orders`, `order_items`) and the service is a
@@ -200,3 +201,32 @@ it is enforced. `UNAUTHENTICATED` maps to HTTP 502 at the client (a server-confi
 fault, not the caller's) per workflow.md.
 **Alternatives:** channel-level call credentials (heavier, TLS-oriented — out of
 scope, no TLS in v1); no server-side check (token attached but meaningless).
+
+### D-035 — Adopt Alembic + domain-module layout for order-service (supersedes D-033)
+**Date:** 2026-07-06
+**Decision:** Manage order-db's schema with **Alembic** (run `alembic upgrade head`
+in the container entrypoint, mirroring inventory's Django `migrate`), and
+restructure order-service from a layer split into a **domain-module layout**:
+`app/core/` (config, database), `app/api/api_v1.py` (router aggregator),
+`app/modules/orders/` (`router`, `service`, `schemas`, `models`). The gRPC
+orchestration moves from `main.py` into `OrderService`.
+**Why (Alembic):** `create_all` only ever *creates missing* tables — it cannot
+`ALTER` an existing one, so the first column change silently no-ops and the schema
+drifts. Alembic gives versioned, reversible, reviewable migrations — the same
+discipline inventory already has. D-033 correctly called this the future path;
+that future is now (the schema is about to evolve, and running the two services
+with matching "migrate on deploy" stories is clearer).
+**Why (layout):** Domain cohesion — a feature's contract, rules, wiring, and
+tables live in one folder, so a change touches one place instead of five sibling
+files. Routers become thin HTTP adapters; `OrderService` is unit-testable without
+FastAPI. Structure follows the `fastapi-orm-lite-scaffold` convention.
+**Kept from before:** SQLAlchemy 2.0 **async** + asyncpg (D-030) — the scaffold's
+SQLModel/sync default was explicitly *not* adopted; it would undo the non-blocking
+REST→gRPC hop that is the service's whole point. The public contract is unchanged:
+routers mount at the app root, so `POST /orders` / `GET /orders/{id}` (D-031) still
+resolve — the aggregator is not under `/api/v1`.
+**Migration runs in the entrypoint** (not app startup): schema reconciliation is a
+deploy step, not request-path work, and it keeps the ASGI process from owning DDL.
+**Alternatives:** Switch to SQLModel + sync (rejected — undoes D-030 for no gain);
+keep `create_all` alongside Alembic (rejected — two sources of schema truth);
+migrate manually only (rejected — a fresh `compose up` would boot with no tables).

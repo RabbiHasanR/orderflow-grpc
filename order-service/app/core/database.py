@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase
 
-from app.config import get_settings
+from app.core.config import get_settings
 
 
 class Base(DeclarativeBase):
@@ -25,12 +25,6 @@ def create_engine() -> AsyncEngine:
 # objects usable after the session closes (we serialize them into the response).
 engine: AsyncEngine = create_engine()
 async_session = async_sessionmaker(engine, expire_on_commit=False)
-
-
-async def init_models() -> None:
-    """Create tables if they do not exist (D-033; called from the lifespan)."""
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:

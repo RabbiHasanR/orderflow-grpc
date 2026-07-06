@@ -9,7 +9,7 @@ from uuid import uuid4
 from sqlalchemy import DateTime, ForeignKey, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db import Base
+from app.core.database import Base
 
 
 def _new_order_id() -> str:

@@ -8,7 +8,7 @@ import logging
 import grpc
 from grpc.aio import Channel
 
-from app.config import Settings
+from app.core.config import Settings
 from app.grpc_client.interceptors import AuthClientInterceptor
 from app.generated import order_inventory_pb2 as pb2
 from app.generated import order_inventory_pb2_grpc as pb2_grpc
