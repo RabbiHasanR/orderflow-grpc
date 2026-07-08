@@ -5,6 +5,8 @@ lives in ``inventory_app.services``. Business outcomes (insufficient stock,
 unknown product, non-positive quantity) are returned as ``success=False`` with
 per-item reasons; gRPC error statuses are reserved for malformed requests.
 """
+from collections.abc import Iterator
+
 import grpc
 
 from generated import order_inventory_pb2 as pb2
@@ -42,4 +44,58 @@ class InventoryServicer(pb2_grpc.InventoryServiceServicer):
                 )
                 for result in outcome.results
             ],
+        )
+
+    def ReserveStockBulk(
+        self,
+        request_iterator: Iterator[pb2.BulkReserveItem],
+        context: grpc.ServicerContext,
+    ) -> pb2.BulkReserveSummary:
+        """Read a stream of reservation lines, reserve each best-effort, reply once.
+
+        Client-streaming: consume ``request_iterator`` to exhaustion, then return
+        a single ``BulkReserveSummary``. Each line is reserved on its own by
+        delegating to the same ``reserve_stock`` the unary path uses, with a
+        one-item list — so every line gets its own ``transaction.atomic()`` and
+        one failing line never rolls back the others (best-effort per item).
+
+        A malformed line (empty ``order_ref``) is recorded as a failed outcome
+        rather than aborting the whole stream, keeping the best-effort contract.
+        """
+        results: list[pb2.BulkItemOutcome] = []
+        reserved_count = 0
+
+        for item in request_iterator:
+            if not item.order_ref:
+                results.append(
+                    pb2.BulkItemOutcome(
+                        order_ref=item.order_ref,
+                        product_id=item.product_id,
+                        reserved=False,
+                        reason="order_ref is required",
+                    )
+                )
+                continue
+
+            outcome = reserve_stock(
+                order_ref=item.order_ref,
+                items=[ReserveItem(product_id=item.product_id, quantity=item.quantity)],
+            )
+            result = outcome.results[0]
+            if result.reserved:
+                reserved_count += 1
+            results.append(
+                pb2.BulkItemOutcome(
+                    order_ref=item.order_ref,
+                    product_id=result.product_id,
+                    reserved=result.reserved,
+                    reason=result.reason,
+                )
+            )
+
+        return pb2.BulkReserveSummary(
+            total=len(results),
+            reserved_count=reserved_count,
+            failed_count=len(results) - reserved_count,
+            results=results,
         )

@@ -9,7 +9,7 @@ import grpc
 from grpc.aio import Channel
 
 from app.core.config import Settings
-from app.grpc_client.interceptors import AuthClientInterceptor
+from app.grpc_client.interceptors import auth_client_interceptors
 from app.generated import order_inventory_pb2 as pb2
 from app.generated import order_inventory_pb2_grpc as pb2_grpc
 
@@ -29,7 +29,7 @@ def build_channel(settings: Settings) -> Channel:
     return grpc.aio.insecure_channel(  # internal network; TLS is a future extension
         target,
         options=options,
-        interceptors=[AuthClientInterceptor(settings.grpc_auth_token)],
+        interceptors=auth_client_interceptors(settings.grpc_auth_token),
     )
 
 
@@ -54,3 +54,32 @@ class InventoryClient:
             items=[pb2.ReserveItem(product_id=pid, quantity=qty) for pid, qty in items],
         )
         return await self._stub.ReserveStock(request, timeout=self._deadline)
+
+    async def reserve_stock_bulk(
+        self, lines: list[tuple[str, int, int]]
+    ) -> pb2.BulkReserveSummary:
+        """Stream reservation lines across many orders; return the one summary.
+
+        Client-streaming: instead of a single request message, ``grpc.aio`` wants
+        an *async iterator* of messages. We hand it ``_request_gen``; grpc pulls
+        one ``BulkReserveItem`` at a time and sends it, and the single awaited
+        result is the server's end-of-stream ``BulkReserveSummary``.
+
+        Args:
+            lines: ``(order_ref, product_id, quantity)`` tuples, possibly spanning
+                many orders.
+
+        Raises:
+            grpc.aio.AioRpcError: on transport/status failure (mapped to HTTP by
+                the caller).
+        """
+
+        async def _request_gen():
+            for order_ref, pid, qty in lines:
+                yield pb2.BulkReserveItem(
+                    order_ref=order_ref, product_id=pid, quantity=qty
+                )
+
+        return await self._stub.ReserveStockBulk(
+            _request_gen(), timeout=self._deadline
+        )

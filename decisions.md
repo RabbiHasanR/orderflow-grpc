@@ -230,3 +230,35 @@ deploy step, not request-path work, and it keeps the ASGI process from owning DD
 **Alternatives:** Switch to SQLModel + sync (rejected — undoes D-030 for no gain);
 keep `create_all` alongside Alembic (rejected — two sources of schema truth);
 migrate manually only (rejected — a fresh `compose up` would boot with no tables).
+
+### D-036 — Client-streaming `ReserveStockBulk` is best-effort per item
+**Date:** 2026-07-08
+**Decision:** Add a **client-streaming** RPC `ReserveStockBulk(stream
+BulkReserveItem) → BulkReserveSummary` alongside — not replacing — the unary
+`ReserveStock`. It reserves lines across **many orders** in one stream,
+**best-effort per item**: the server reserves each streamed line in its own
+transaction (reusing `reserve_stock` with a one-item list), so some lines succeed
+while others fail and nothing rolls back the batch. It returns a single aggregate
+summary at end-of-stream. order-service exposes it at `POST /orders/bulk`, which
+persists only orders whose every line reserved. See [spec 005](specs/005-bulk-reserve-stream.md).
+**Why client streaming:** the unary path already models "one order, many items,
+all-or-nothing." The distinct `many-in → one-out` shape — a stream of lines
+spanning many orders, folded into one summary — is exactly what client streaming
+is for: it amortizes N reservations over one call/connection and lets the server
+aggregate, versus N unary round-trips. Keeping it a *second* RPC leaves the unary
+contract and its atomic guarantee untouched.
+**Why best-effort (not atomic):** atomic-across-many-orders would make one bad
+line fail an entire import — the wrong semantics for a bulk edge. Reusing
+`reserve_stock` per line gives independent transactions for free and keeps the
+row-lock concurrency safety of D-001/spec 001.
+**Known caveat — orphaned reservations:** because reservation is per-item but
+order persistence is per-order (all-or-nothing at persist time), a **partially**
+reserved order leaves stock decremented on inventory while the order is *not*
+saved on order-service. v1 surfaces these as `partial` in the response body; a
+compensating release (saga-style) is deliberately out of scope for the learning
+milestone (future spec/task).
+**Alternatives:** atomic bulk (rejected — one bad line kills the batch); a new
+best-effort service function on the server (rejected — `reserve_stock` per line
+already is best-effort and is already tested); bidirectional streaming with a
+per-item reply (rejected — caller only needs the aggregate, not a live per-line
+ack).

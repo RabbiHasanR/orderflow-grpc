@@ -6,13 +6,20 @@ syntax = "proto3";
 // generated output.
 package orderflow.inventory.v1;
 
-// The only RPC for now: the unary happy path described in workflow.md.
-// Streaming RPCs (live stock watch / bulk restock / interactive session) will be
-// added in a later phase.
+// Two shapes of the same reservation primitive:
+//   - ReserveStock: unary, one order, all-or-nothing (workflow.md).
+//   - ReserveStockBulk: client-streaming, MANY orders, best-effort per item.
 service InventoryService {
   // Atomically reserve stock for an order, all-or-nothing. Maps 1:1 onto the
   // inventory service layer's reserve_stock(order_ref, items) function.
   rpc ReserveStock(ReserveStockRequest) returns (ReserveStockResponse);
+
+  // Client-streaming: reserve lines across MANY orders, best-effort per item.
+  // The client streams one BulkReserveItem per line; the server reserves each
+  // in its own transaction (some may succeed while others fail) and returns a
+  // single aggregate summary once the stream is exhausted. Contrast with the
+  // unary all-or-nothing ReserveStock above.
+  rpc ReserveStockBulk(stream BulkReserveItem) returns (BulkReserveSummary);
 }
 
 // One requested line: reserve `quantity` of product `product_id`.
@@ -42,4 +49,30 @@ message ReserveStockResponse {
   // True only if every item was reserved; when false, nothing was persisted.
   bool success = 1;
   repeated ItemOutcome results = 2;
+}
+
+// One streamed line for ReserveStockBulk. Self-contained: unlike the unary
+// request (which names its order_ref once), each streamed line carries its own
+// order_ref so a single stream can span many orders.
+message BulkReserveItem {
+  string order_ref = 1;
+  int64 product_id = 2;
+  int32 quantity = 3;
+}
+
+// Per-line result for the bulk stream. Like ItemOutcome but also echoes the
+// order_ref, so the caller can regroup outcomes by order.
+message BulkItemOutcome {
+  string order_ref = 1;
+  int64 product_id = 2;
+  bool reserved = 3;
+  string reason = 4;
+}
+
+// The single "one-out" response returned after the whole stream is read.
+message BulkReserveSummary {
+  int32 total = 1;
+  int32 reserved_count = 2;
+  int32 failed_count = 3;
+  repeated BulkItemOutcome results = 4;
 }

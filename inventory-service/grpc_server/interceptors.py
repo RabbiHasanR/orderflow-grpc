@@ -1,6 +1,7 @@
 """Server-side gRPC interceptors: auth-token enforcement and per-RPC logging."""
 import logging
 import time
+from collections.abc import Callable
 
 import grpc
 from django.conf import settings
@@ -11,12 +12,20 @@ logger = logging.getLogger("inventory.grpc")
 AUTH_METADATA_KEY = "x-auth-token"
 
 
-def _abort_handler(code: grpc.StatusCode, details: str) -> grpc.RpcMethodHandler:
-    """Build a unary-unary handler that immediately aborts every call."""
+def _abort_handler(
+    handler: grpc.RpcMethodHandler, code: grpc.StatusCode, details: str
+) -> grpc.RpcMethodHandler:
+    """Build an aborting handler of the *same RPC kind* as ``handler``.
+
+    The replacement must match the real handler's kind (unary-unary vs
+    stream-unary) or gRPC mis-dispatches it, so we branch on ``handler``.
+    """
 
     def terminate(request: object, context: grpc.ServicerContext) -> None:
         context.abort(code, details)
 
+    if handler.stream_unary:
+        return grpc.stream_unary_rpc_method_handler(terminate)
     return grpc.unary_unary_rpc_method_handler(terminate)
 
 
@@ -36,13 +45,16 @@ class AuthInterceptor(grpc.ServerInterceptor):
 
         metadata = dict(handler_call_details.invocation_metadata or [])
         presented = metadata.get(AUTH_METADATA_KEY)
+        handler = continuation(handler_call_details)
         if presented != self._expected:
             logger.warning(
                 "rejecting %s: missing/invalid auth token", handler_call_details.method
             )
-            return _abort_handler(grpc.StatusCode.UNAUTHENTICATED, "invalid auth token")
+            return _abort_handler(
+                handler, grpc.StatusCode.UNAUTHENTICATED, "invalid auth token"
+            )
 
-        return continuation(handler_call_details)
+        return handler
 
 
 class LoggingInterceptor(grpc.ServerInterceptor):
@@ -51,30 +63,44 @@ class LoggingInterceptor(grpc.ServerInterceptor):
     def intercept_service(self, continuation, handler_call_details):
         """Wrap the resolved handler to time the call and log its outcome."""
         handler = continuation(handler_call_details)
-        # Only unary-unary RPCs exist today; leave other kinds untouched.
-        if handler is None or not handler.unary_unary:
+        if handler is None:
             return handler
 
         method = handler_call_details.method
 
-        def wrapper(request: object, context: grpc.ServicerContext) -> object:
-            start = time.perf_counter()
-            try:
-                response = handler.unary_unary(request, context)
-            except Exception:
-                # Covers context.abort() (raises) and unexpected servicer errors.
-                elapsed_ms = (time.perf_counter() - start) * 1000
-                logger.info(
-                    "%s peer=%s status=%s %.1fms",
-                    method, context.peer(), context.code(), elapsed_ms,
-                )
-                raise
-            elapsed_ms = (time.perf_counter() - start) * 1000
-            logger.info("%s peer=%s status=OK %.1fms", method, context.peer(), elapsed_ms)
-            return response
+        def timed(inner: Callable) -> Callable:
+            """Wrap a handler function to time it and log method/peer/status."""
 
-        return grpc.unary_unary_rpc_method_handler(
-            wrapper,
-            request_deserializer=handler.request_deserializer,
-            response_serializer=handler.response_serializer,
-        )
+            def wrapper(request_or_iter: object, context: grpc.ServicerContext) -> object:
+                start = time.perf_counter()
+                try:
+                    response = inner(request_or_iter, context)
+                except Exception:
+                    # Covers context.abort() (raises) and unexpected errors.
+                    elapsed_ms = (time.perf_counter() - start) * 1000
+                    logger.info(
+                        "%s peer=%s status=%s %.1fms",
+                        method, context.peer(), context.code(), elapsed_ms,
+                    )
+                    raise
+                elapsed_ms = (time.perf_counter() - start) * 1000
+                logger.info("%s peer=%s status=OK %.1fms", method, context.peer(), elapsed_ms)
+                return response
+
+            return wrapper
+
+        # Handle both RPC kinds this service exposes: unary-unary (ReserveStock)
+        # and stream-unary (ReserveStockBulk). Other kinds pass through unwrapped.
+        if handler.unary_unary:
+            return grpc.unary_unary_rpc_method_handler(
+                timed(handler.unary_unary),
+                request_deserializer=handler.request_deserializer,
+                response_serializer=handler.response_serializer,
+            )
+        if handler.stream_unary:
+            return grpc.stream_unary_rpc_method_handler(
+                timed(handler.stream_unary),
+                request_deserializer=handler.request_deserializer,
+                response_serializer=handler.response_serializer,
+            )
+        return handler

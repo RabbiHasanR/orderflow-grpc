@@ -49,3 +49,35 @@ class ItemResultOut(BaseModel):
     product_id: int
     reserved: bool
     reason: str
+
+
+class BulkOrderCreate(BaseModel):
+    """Request body for ``POST /orders/bulk`` — many orders in one call.
+
+    Each order reuses the same shape as the unary endpoint; the whole batch is
+    streamed to inventory's client-streaming ``ReserveStockBulk`` RPC.
+    """
+
+    orders: list[OrderCreate] = Field(min_length=1, description="At least one order.")
+
+
+class BulkOrderResult(BaseModel):
+    """Outcome for one order in the batch.
+
+    ``status`` is ``persisted`` (every line reserved and the order saved),
+    ``partial`` (some lines reserved, order not saved), or ``failed`` (no lines
+    reserved). Best-effort per item means ``partial`` can leave orphaned
+    reservations on the inventory side (see spec 005 / decisions.md D-036).
+    """
+
+    order_ref: str
+    status: str
+    items: list[ItemResultOut]
+
+
+class BulkOrderOut(BaseModel):
+    """Aggregate response for the bulk endpoint."""
+
+    total_orders: int
+    persisted_count: int
+    results: list[BulkOrderResult]

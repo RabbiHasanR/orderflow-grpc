@@ -18,5 +18,6 @@ IDs are zero-padded 3-digit, mirroring the `D-NNN` scheme in `decisions.md`.
 | [002](002-order-creation.md) | Order creation flow | order-service    | in-progress | `POST /orders` fans out to `ReserveStock`, then persists (built; round-robin demo pending) |
 | [003](003-inventory-containerization.md) | Inventory-service containerization | inventory-service | done | Production Dockerfile + Compose slice (inventory-db + inventory-service) |
 | [004](004-order-service-restructure.md) | Order-service domain layout + Alembic | order-service | in-progress | Domain-module layout (`core`/`api`/`modules/orders`) + Alembic migrations replacing startup `create_all` (D-035) |
+| [005](005-bulk-reserve-stream.md) | Bulk reserve stock (client-streaming) | both | in-progress | Client-streaming `ReserveStockBulk` (many orders, best-effort per item) + `POST /orders/bulk` (D-036) |
 
-<!-- Next free ID: 005 -->
+<!-- Next free ID: 006 -->
