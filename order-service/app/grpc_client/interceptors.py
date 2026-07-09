@@ -7,8 +7,9 @@ grpc.aio gotcha: a channel partitions its interceptors by RPC *kind* with an
 elif-chain, so a single object that inherits several ``*ClientInterceptor``
 mixins lands in only the FIRST matching bucket. One interceptor instance
 therefore serves exactly one RPC kind — we register one per kind we use
-(unary-unary for ``ReserveStock``, stream-unary for ``ReserveStockBulk``), both
-built by :func:`auth_client_interceptors`.
+(unary-unary for ``ReserveStock``, stream-unary for ``ReserveStockBulk``,
+unary-stream for ``WatchLowStock``), all built by
+:func:`auth_client_interceptors`.
 """
 from collections.abc import Callable
 
@@ -16,6 +17,7 @@ from grpc.aio import (
     ClientCallDetails,
     ClientInterceptor,
     StreamUnaryClientInterceptor,
+    UnaryStreamClientInterceptor,
     UnaryUnaryClientInterceptor,
 )
 
@@ -69,6 +71,23 @@ class StreamUnaryAuthInterceptor(_AuthBase, StreamUnaryClientInterceptor):
         return await continuation(self._with_auth(client_call_details), request_iterator)
 
 
+class UnaryStreamAuthInterceptor(_AuthBase, UnaryStreamClientInterceptor):
+    """Attach the auth token on unary-stream RPCs (``WatchLowStock``)."""
+
+    async def intercept_unary_stream(
+        self,
+        continuation: Callable,
+        client_call_details: ClientCallDetails,
+        request: object,
+    ) -> object:
+        """Inject the auth header, then continue the unary-stream (server-stream) call."""
+        return await continuation(self._with_auth(client_call_details), request)
+
+
 def auth_client_interceptors(token: str) -> list[ClientInterceptor]:
     """One auth interceptor per RPC kind the client uses (see module docstring)."""
-    return [UnaryUnaryAuthInterceptor(token), StreamUnaryAuthInterceptor(token)]
+    return [
+        UnaryUnaryAuthInterceptor(token),
+        StreamUnaryAuthInterceptor(token),
+        UnaryStreamAuthInterceptor(token),
+    ]

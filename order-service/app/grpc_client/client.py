@@ -4,6 +4,7 @@ Uses ``grpc.aio`` (D-030) with client-side ``round_robin`` load balancing over a
 ``dns:///`` target, so scaling inventory replicas needs no code change.
 """
 import logging
+from collections.abc import AsyncIterator
 
 import grpc
 from grpc.aio import Channel
@@ -83,3 +84,29 @@ class InventoryClient:
         return await self._stub.ReserveStockBulk(
             _request_gen(), timeout=self._deadline
         )
+
+    async def watch_low_stock(
+        self, threshold: int, sku_prefix: str = ""
+    ) -> AsyncIterator[pb2.ProductStock]:
+        """Stream products at/below ``threshold``; yield each as it arrives.
+
+        Server-streaming: the stub call returns an async iterator (not an
+        awaitable). We ``async for`` over it and re-yield, so the caller consumes
+        one ``ProductStock`` at a time and nothing is buffered — the constant-
+        memory property holds all the way from the DB cursor to here.
+
+        The per-call ``timeout`` bounds the *whole* stream, which suits this
+        bounded query; a true long-lived "watch" would drop or extend it.
+
+        Args:
+            threshold: Inclusive upper bound on ``available_quantity``.
+            sku_prefix: Optional SKU prefix filter; "" means no filter.
+
+        Raises:
+            grpc.aio.AioRpcError: on transport/status failure. It surfaces when
+                iteration starts, so the caller can map a pre-stream failure to an
+                HTTP status before the response body begins (see the router).
+        """
+        request = pb2.LowStockQuery(threshold=threshold, sku_prefix=sku_prefix)
+        async for product in self._stub.WatchLowStock(request, timeout=self._deadline):
+            yield product

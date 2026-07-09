@@ -17,8 +17,10 @@ def _abort_handler(
 ) -> grpc.RpcMethodHandler:
     """Build an aborting handler of the *same RPC kind* as ``handler``.
 
-    The replacement must match the real handler's kind (unary-unary vs
-    stream-unary) or gRPC mis-dispatches it, so we branch on ``handler``.
+    The replacement must match the real handler's kind (unary-unary,
+    stream-unary, or unary-stream) or gRPC mis-dispatches it, so we branch on
+    ``handler``. ``context.abort`` raises, so the same ``terminate`` works for a
+    streaming handler too — it aborts before yielding anything.
     """
 
     def terminate(request: object, context: grpc.ServicerContext) -> None:
@@ -26,6 +28,8 @@ def _abort_handler(
 
     if handler.stream_unary:
         return grpc.stream_unary_rpc_method_handler(terminate)
+    if handler.unary_stream:
+        return grpc.unary_stream_rpc_method_handler(terminate)
     return grpc.unary_unary_rpc_method_handler(terminate)
 
 
@@ -69,7 +73,7 @@ class LoggingInterceptor(grpc.ServerInterceptor):
         method = handler_call_details.method
 
         def timed(inner: Callable) -> Callable:
-            """Wrap a handler function to time it and log method/peer/status."""
+            """Wrap a single-response handler to time it and log the outcome."""
 
             def wrapper(request_or_iter: object, context: grpc.ServicerContext) -> object:
                 start = time.perf_counter()
@@ -89,8 +93,40 @@ class LoggingInterceptor(grpc.ServerInterceptor):
 
             return wrapper
 
-        # Handle both RPC kinds this service exposes: unary-unary (ReserveStock)
-        # and stream-unary (ReserveStockBulk). Other kinds pass through unwrapped.
+        def timed_stream(inner: Callable) -> Callable:
+            """Wrap a response-streaming handler.
+
+            Unlike ``timed``, a server-streaming handler returns *lazily*: calling
+            it just builds a generator, so latency and message count are only
+            known once the stream is fully drained. We therefore iterate it here,
+            counting messages, and log on completion or on error.
+            """
+
+            def wrapper(request: object, context: grpc.ServicerContext) -> object:
+                start = time.perf_counter()
+                count = 0
+                try:
+                    for response in inner(request, context):
+                        count += 1
+                        yield response
+                except Exception:
+                    elapsed_ms = (time.perf_counter() - start) * 1000
+                    logger.info(
+                        "%s peer=%s status=%s msgs=%d %.1fms",
+                        method, context.peer(), context.code(), count, elapsed_ms,
+                    )
+                    raise
+                elapsed_ms = (time.perf_counter() - start) * 1000
+                logger.info(
+                    "%s peer=%s status=OK msgs=%d %.1fms",
+                    method, context.peer(), count, elapsed_ms,
+                )
+
+            return wrapper
+
+        # Handle the RPC kinds this service exposes: unary-unary (ReserveStock),
+        # stream-unary (ReserveStockBulk), and unary-stream (WatchLowStock).
+        # Other kinds pass through unwrapped.
         if handler.unary_unary:
             return grpc.unary_unary_rpc_method_handler(
                 timed(handler.unary_unary),
@@ -100,6 +136,12 @@ class LoggingInterceptor(grpc.ServerInterceptor):
         if handler.stream_unary:
             return grpc.stream_unary_rpc_method_handler(
                 timed(handler.stream_unary),
+                request_deserializer=handler.request_deserializer,
+                response_serializer=handler.response_serializer,
+            )
+        if handler.unary_stream:
+            return grpc.unary_stream_rpc_method_handler(
+                timed_stream(handler.unary_stream),
                 request_deserializer=handler.request_deserializer,
                 response_serializer=handler.response_serializer,
             )

@@ -6,7 +6,7 @@ concurrent orders cannot both read the same quantity and oversell. Reservation
 is all-or-nothing: any unsatisfiable line rolls back the whole batch, but a
 per-item breakdown is still returned.
 """
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 
 from django.db import transaction
@@ -37,6 +37,16 @@ class ReservationOutcome:
 
     success: bool
     results: list[ItemOutcome] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ProductStockRow:
+    """A single product's current stock, streamed by :func:`stream_low_stock`."""
+
+    product_id: int
+    sku: str
+    name: str
+    available_quantity: int
 
 
 def reserve_stock(order_ref: str, items: Sequence[ReserveItem]) -> ReservationOutcome:
@@ -105,3 +115,33 @@ def reserve_stock(order_ref: str, items: Sequence[ReserveItem]) -> ReservationOu
             transaction.set_rollback(True)
 
     return ReservationOutcome(success=all_ok, results=outcomes)
+
+
+def stream_low_stock(
+    threshold: int, sku_prefix: str = ""
+) -> Iterator[ProductStockRow]:
+    """Yield every product with ``available_quantity <= threshold``, lazily.
+
+    Read-only (no transaction). ``.iterator()`` streams rows straight from the DB
+    cursor instead of materialising the whole queryset, so memory stays flat no
+    matter how large the catalog is — this is what lets the gRPC layer forward
+    the rows as a server-stream without buffering.
+
+    Args:
+        threshold: Inclusive upper bound on ``available_quantity``.
+        sku_prefix: Optional SKU prefix filter; empty string means no filter.
+
+    Yields:
+        One :class:`ProductStockRow` per matching product, ordered by SKU.
+    """
+    products = Product.objects.filter(available_quantity__lte=threshold)
+    if sku_prefix:
+        products = products.filter(sku__startswith=sku_prefix)
+
+    for product in products.order_by("sku").iterator():
+        yield ProductStockRow(
+            product_id=product.pk,
+            sku=product.sku,
+            name=product.name,
+            available_quantity=product.available_quantity,
+        )

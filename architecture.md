@@ -23,6 +23,9 @@ What this project is meant to teach / demonstrate:
 5. **Realistic Compose topology** — internal-only gRPC backends, per-service DBs,
    service-name DNS resolution, named volumes for persistence.
 6. **The day-to-day proto regeneration workflow** across two language setups.
+7. **All three basic RPC shapes** — unary (`ReserveStock`), client-streaming
+   (`ReserveStockBulk`, D-036), and server-streaming (`WatchLowStock`, D-037,
+   re-streamed to REST as NDJSON at `GET /inventory/low-stock`).
 
 Non-goals (for the first pass): TLS/mTLS, service mesh, a real LB proxy
 (Envoy/nginx), Kubernetes, distributed tracing.

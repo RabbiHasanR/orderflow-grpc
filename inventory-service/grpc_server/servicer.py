@@ -11,7 +11,7 @@ import grpc
 
 from generated import order_inventory_pb2 as pb2
 from generated import order_inventory_pb2_grpc as pb2_grpc
-from inventory_app.services import ReserveItem, reserve_stock
+from inventory_app.services import ReserveItem, reserve_stock, stream_low_stock
 
 
 class InventoryServicer(pb2_grpc.InventoryServiceServicer):
@@ -99,3 +99,32 @@ class InventoryServicer(pb2_grpc.InventoryServiceServicer):
             failed_count=len(results) - reserved_count,
             results=results,
         )
+
+    def WatchLowStock(
+        self,
+        request: pb2.LowStockQuery,
+        context: grpc.ServicerContext,
+    ) -> Iterator[pb2.ProductStock]:
+        """Stream every product at/below ``threshold``, one message at a time.
+
+        Server-streaming: instead of returning a single message we ``yield`` one
+        ``ProductStock`` per matching row, pulled lazily from the service layer's
+        cursor-backed generator. An empty result is a valid zero-message stream,
+        not an error — gRPC error statuses stay reserved for malformed requests.
+
+        We check ``context.is_active()`` before each yield so a client that
+        cancels or hits its deadline stops the DB iteration promptly instead of
+        walking the whole catalog for nobody.
+        """
+        if request.threshold < 0:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "threshold must be >= 0")
+
+        for row in stream_low_stock(request.threshold, request.sku_prefix):
+            if not context.is_active():  # client cancelled or deadline exceeded
+                return
+            yield pb2.ProductStock(
+                product_id=row.product_id,
+                sku=row.sku,
+                name=row.name,
+                available_quantity=row.available_quantity,
+            )

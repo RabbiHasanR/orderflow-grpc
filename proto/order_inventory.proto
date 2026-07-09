@@ -6,9 +6,10 @@ syntax = "proto3";
 // generated output.
 package orderflow.inventory.v1;
 
-// Two shapes of the same reservation primitive:
+// Three RPC shapes over the same inventory:
 //   - ReserveStock: unary, one order, all-or-nothing (workflow.md).
 //   - ReserveStockBulk: client-streaming, MANY orders, best-effort per item.
+//   - WatchLowStock: server-streaming, read-only low-stock query.
 service InventoryService {
   // Atomically reserve stock for an order, all-or-nothing. Maps 1:1 onto the
   // inventory service layer's reserve_stock(order_ref, items) function.
@@ -20,6 +21,12 @@ service InventoryService {
   // single aggregate summary once the stream is exhausted. Contrast with the
   // unary all-or-nothing ReserveStock above.
   rpc ReserveStockBulk(stream BulkReserveItem) returns (BulkReserveSummary);
+
+  // Server-streaming: one query in, a stream of matching products out. The
+  // server yields every product at/below the requested threshold one message at
+  // a time, straight from a DB cursor — no big list is buffered on either side.
+  // An empty result is a valid zero-message stream, not an error.
+  rpc WatchLowStock(LowStockQuery) returns (stream ProductStock);
 }
 
 // One requested line: reserve `quantity` of product `product_id`.
@@ -75,4 +82,22 @@ message BulkReserveSummary {
   int32 reserved_count = 2;
   int32 failed_count = 3;
   repeated BulkItemOutcome results = 4;
+}
+
+// Query for WatchLowStock: stream products whose available_quantity is at or
+// below `threshold`, optionally restricted to SKUs starting with `sku_prefix`.
+message LowStockQuery {
+  // Inclusive upper bound on available_quantity. int32 (not uint32) so a
+  // negative value can be sent and rejected by the server.
+  int32 threshold = 1;
+  // Optional SKU prefix filter; "" means no filter.
+  string sku_prefix = 2;
+}
+
+// One streamed product in the WatchLowStock response.
+message ProductStock {
+  int64 product_id = 1;
+  string sku = 2;
+  string name = 3;
+  int32 available_quantity = 4;
 }

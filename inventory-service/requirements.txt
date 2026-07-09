@@ -9,5 +9,9 @@ Django>=5.1,<6.0
 psycopg[binary]>=3.2          # PostgreSQL driver (psycopg3); the binary wheel bundles libpq
 
 # gRPC runtime — serving RPCs and the generated stubs depend on these.
-grpcio>=1.66
-protobuf>=5.27
+# PINNED EXACTLY and kept identical across both services + requirements-dev.txt:
+# generated *_pb2_grpc.py embeds the grpcio-tools version and refuses to import
+# under an older runtime grpcio, so a floating range lets the two images drift to
+# incompatible versions. Regenerate with the matching grpcio-tools==1.81.1.
+grpcio==1.81.1
+protobuf==6.33.6

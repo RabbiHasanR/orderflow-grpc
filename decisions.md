@@ -262,3 +262,44 @@ best-effort service function on the server (rejected — `reserve_stock` per lin
 already is best-effort and is already tested); bidirectional streaming with a
 per-item reply (rejected — caller only needs the aggregate, not a live per-line
 ack).
+
+### D-037 — Server-streaming `WatchLowStock`, re-streamed over REST as NDJSON
+**Date:** 2026-07-09
+**Decision:** Add a **server-streaming** RPC `WatchLowStock(LowStockQuery) →
+stream ProductStock` — the third and final basic gRPC shape (`one-in →
+many-out`), alongside unary `ReserveStock` and client-streaming
+`ReserveStockBulk`. It is **read-only**: stream every product at/below a stock
+threshold (optional `sku_prefix` filter), one message at a time. The server
+yields lazily from the DB cursor (`.iterator()`) and stops early on
+`context.is_active()`; an empty result is a valid zero-message stream.
+order-service fronts it at `GET /inventory/low-stock` and **re-streams NDJSON**
+(`application/x-ndjson`). See [spec 006](specs/006-watch-low-stock-stream.md).
+**Why server streaming:** the point of the shape is a single request driving many
+responses with lazy production and incremental consumption — constant memory
+end-to-end. A low-stock/replenishment query is a natural fit (a catalog can be
+large) and, unlike a "list" that buffers everything into one response, streaming
+lets the first rows arrive before the last are read.
+**Why NDJSON (not a buffered JSON array):** collapsing the stream into one array
+would throw away the property being demonstrated — the whole result would sit in
+memory on the order-service before the client sees a byte. NDJSON via FastAPI
+`StreamingResponse` keeps the stream honest across the REST hop.
+**Error handling splits in two (defining trait of a streamed response):** a
+failure *before* the first byte still maps to an HTTP status — the edge **probes
+the first message** inside `try/except` before returning the response; once bytes
+are on the wire the status line is sent, so a mid-stream failure can only *end*
+the stream (logged, not re-mapped). The per-call deadline bounds the **whole**
+stream — fine for this bounded query, but a true long-lived "watch" would drop or
+extend it.
+**Interceptors (third kind):** both layers were per-kind. Server-side the auth
+abort-handler and logging wrapper gained a `handler.unary_stream` branch; logging
+needed a **stream-aware** wrapper because a streaming handler returns lazily
+(latency/count known only at drain). Client-side a third `UnaryStreamAuthInterceptor`
+was registered (grpc.aio buckets interceptors by kind).
+**Also (DRY):** the gRPC→HTTP status map moved to `grpc_client/errors.py` and the
+`get_inventory` FastAPI dependency to `grpc_client/deps.py`, now shared by the
+orders and inventory routers.
+**Alternatives:** buffered JSON array (rejected — loses the streaming property);
+adding low-stock to the orders module (rejected — it is an inventory read, not an
+order write; a dedicated read-only module fits the domain-module layout, D-035);
+a long-lived push "watch" via server-side polling (rejected for v1 — the bounded
+snapshot query teaches the shape without a change-feed).

@@ -5,4 +5,6 @@
 -r requirements.txt
 
 # protoc + plugins for regenerating gRPC stubs from proto/*.proto.
-grpcio-tools>=1.66
+# Pinned to match the runtime grpcio/protobuf in requirements.txt so regenerated
+# stubs import cleanly in the images (see the note there).
+grpcio-tools==1.81.1

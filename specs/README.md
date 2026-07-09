@@ -19,5 +19,6 @@ IDs are zero-padded 3-digit, mirroring the `D-NNN` scheme in `decisions.md`.
 | [003](003-inventory-containerization.md) | Inventory-service containerization | inventory-service | done | Production Dockerfile + Compose slice (inventory-db + inventory-service) |
 | [004](004-order-service-restructure.md) | Order-service domain layout + Alembic | order-service | in-progress | Domain-module layout (`core`/`api`/`modules/orders`) + Alembic migrations replacing startup `create_all` (D-035) |
 | [005](005-bulk-reserve-stream.md) | Bulk reserve stock (client-streaming) | both | in-progress | Client-streaming `ReserveStockBulk` (many orders, best-effort per item) + `POST /orders/bulk` (D-036) |
+| [006](006-watch-low-stock-stream.md) | Watch low stock (server-streaming) | both | in-progress | Server-streaming `WatchLowStock` (low-stock query) re-streamed as NDJSON at `GET /inventory/low-stock` (D-037) |
 
-<!-- Next free ID: 006 -->
+<!-- Next free ID: 007 -->

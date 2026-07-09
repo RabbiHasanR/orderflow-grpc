@@ -1,11 +1,12 @@
 """HTTP adapter for orders — thin: resolve deps, call the service, return a model."""
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
 from app.grpc_client.client import InventoryClient
+from app.grpc_client.deps import get_inventory
 from app.modules.orders.models import Order
 from app.modules.orders.schemas import (
     BulkOrderCreate,
@@ -16,11 +17,6 @@ from app.modules.orders.schemas import (
 from app.modules.orders.service import OrderService
 
 router = APIRouter()
-
-
-def get_inventory(request: Request) -> InventoryClient:
-    """Return the process-wide inventory gRPC client opened in the lifespan."""
-    return request.app.state.inventory
 
 
 @router.post("", response_model=OrderOut, status_code=status.HTTP_201_CREATED)

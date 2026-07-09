@@ -15,6 +15,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.grpc_client.client import InventoryClient
+from app.grpc_client.errors import grpc_to_http_status
 from app.modules.orders.models import Order, OrderItem
 from app.modules.orders.schemas import (
     BulkOrderCreate,
@@ -25,13 +26,6 @@ from app.modules.orders.schemas import (
 )
 
 logger = logging.getLogger("order.api")
-
-# gRPC status → HTTP status; anything unlisted falls back to 502.
-_GRPC_TO_HTTP = {
-    grpc.StatusCode.UNAVAILABLE: status.HTTP_503_SERVICE_UNAVAILABLE,
-    grpc.StatusCode.DEADLINE_EXCEEDED: status.HTTP_504_GATEWAY_TIMEOUT,
-    grpc.StatusCode.UNAUTHENTICATED: status.HTTP_502_BAD_GATEWAY,
-}
 
 
 class OrderService:
@@ -59,7 +53,7 @@ class OrderService:
         try:
             response = await inventory.reserve_stock(order_ref=order_ref, items=line_items)
         except grpc.aio.AioRpcError as exc:
-            http_status = _GRPC_TO_HTTP.get(exc.code(), status.HTTP_502_BAD_GATEWAY)
+            http_status = grpc_to_http_status(exc.code())
             logger.warning("ReserveStock failed: %s → HTTP %s", exc.code(), http_status)
             raise HTTPException(
                 status_code=http_status,
@@ -120,7 +114,7 @@ class OrderService:
         try:
             summary = await inventory.reserve_stock_bulk(lines)
         except grpc.aio.AioRpcError as exc:
-            http_status = _GRPC_TO_HTTP.get(exc.code(), status.HTTP_502_BAD_GATEWAY)
+            http_status = grpc_to_http_status(exc.code())
             logger.warning("ReserveStockBulk failed: %s → HTTP %s", exc.code(), http_status)
             raise HTTPException(
                 status_code=http_status,
