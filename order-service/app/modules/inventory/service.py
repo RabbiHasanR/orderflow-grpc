@@ -139,6 +139,7 @@ class InventoryService:
                             {"error": "invalid command", "detail": exc.errors()}
                         )
                         continue
+                    logger.info("command: %s", command)
                     await commands.put(
                         pb2.WatchCommand(
                             action=_COMMAND_ACTIONS[command.action],
