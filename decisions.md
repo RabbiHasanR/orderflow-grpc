@@ -303,3 +303,54 @@ adding low-stock to the orders module (rejected — it is an inventory read, not
 order write; a dedicated read-only module fits the domain-module layout, D-035);
 a long-lived push "watch" via server-side polling (rejected for v1 — the bounded
 snapshot query teaches the shape without a change-feed).
+
+### D-038 — Bidirectional-streaming `WatchStock`, fronted over a WebSocket
+**Date:** 2026-07-10
+**Decision:** Add the fourth and final gRPC shape — **bidirectional streaming**
+`WatchStock(stream WatchCommand) → stream StockUpdate`. The client streams
+subscribe/unsubscribe commands; the server independently streams `StockUpdate`s
+for the current watch set — a `SNAPSHOT` when a product is subscribed, then a
+`CHANGED` whenever a watched product's `available_quantity` differs on a poll tick
+(`GRPC_WATCH_POLL_SECONDS`, default 2s). Read-only; the reservation write-path is
+untouched. order-service fronts it at a **WebSocket** `WS /inventory/stock-watch`
+plus a browser demo page `GET /inventory/stock-watch/demo`. See
+[spec 007](specs/007-live-stock-watch-bidi.md).
+**Why bidi (vs the other three shapes):** the defining property is *decoupled
+duplex* — the request and response streams flow concurrently and a response is
+**not** 1:1 with a request. A subscribe command doesn't yield "one answer"; it
+reshapes what the response stream emits. This is a clean evolution of
+server-streaming `WatchLowStock` (D-037): a fixed one-shot query becomes a
+*mutable live subscription* you steer mid-stream without reconnecting.
+**Why a WebSocket edge (not GET/NDJSON):** NDJSON fronted `WatchLowStock` because
+that stream was one-directional. A plain HTTP request body cannot carry a
+*client→server* message stream, so the honest full-duplex edge is a WebSocket.
+The edge runs **two concurrent asyncio tasks** (socket→gRPC and gRPC→socket),
+mirroring the server's two threads; whichever side ends first tears the other
+down. A demo HTML page makes the duplex visible in a browser.
+**Sync-server concurrency (the core lesson):** on the ThreadPoolExecutor server
+(D-021) one thread cannot both block on `for cmd in request_iterator` and
+poll+`yield` responses, so the handler spawns a **background reader thread** that
+drains the command stream into a lock-guarded `watch_set`, while the handler's own
+pool thread polls and yields. Teardown is **client-driven** — there is no deadline
+on a live watch (the client omits the per-call `GRPC_DEADLINE_SECONDS` that the
+other RPCs use, the concrete form of the D-037 "a real watch would drop/extend the
+deadline" caveat); the loop exits when the request stream closes (`stop` event) or
+the client cancels (`context.is_active()`).
+**Interceptors (fourth kind):** both layers were per-RPC-kind. Server-side the
+auth abort-handler and the logging wrapper gained a `handler.stream_stream` branch
+(logging reuses the existing `timed_stream` wrapper — it already iterates a
+response generator regardless of request arity). Client-side a fourth
+`StreamStreamAuthInterceptor` was registered (grpc.aio buckets interceptors by
+kind).
+**Scaling trade-off (accepted for a learning/demo scale):** each active watch
+holds **two** pool threads (handler + reader) for its whole lifetime, bounded by
+`GRPC_MAX_WORKERS`, and `server.stop(grace)` will not force-close long-lived
+streams (teardown is client-driven). A production system at scale would use an
+async server and/or a DB change-feed (LISTEN/NOTIFY) instead of per-watcher
+polling — deliberately out of scope here.
+**Alternatives:** interactive reservation-session bidi (rejected — "ping-pong",
+one response per request, barely needs full-duplex and doesn't show stream
+independence); SSE + POST hybrid at the edge (rejected — two half-duplex channels
+to emulate what one WebSocket does honestly); gRPC-only with no HTTP edge
+(rejected — the WebSocket bridge is itself a realistic, testable production
+pattern worth demonstrating).

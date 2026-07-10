@@ -110,3 +110,31 @@ class InventoryClient:
         request = pb2.LowStockQuery(threshold=threshold, sku_prefix=sku_prefix)
         async for product in self._stub.WatchLowStock(request, timeout=self._deadline):
             yield product
+
+    async def watch_stock(
+        self, commands: AsyncIterator[pb2.WatchCommand]
+    ) -> AsyncIterator[pb2.StockUpdate]:
+        """Open the bidirectional ``WatchStock`` call: commands in, updates out.
+
+        Bidi: we hand the stub an *async iterator* of ``WatchCommand`` (driven by
+        whatever produces commands — e.g. a WebSocket) and it returns an async
+        iterator of ``StockUpdate``. Both directions run concurrently over one
+        call; we just re-yield each update as it arrives.
+
+        Note the deliberate absence of ``timeout=self._deadline``: a live watch is
+        **unbounded**, so the per-call deadline the other methods use would kill it
+        after a few seconds. Teardown is client-driven — when ``commands`` is
+        exhausted (the caller closes it) or the call is cancelled, the stream ends.
+        This is the "a true long-lived watch would drop or extend the deadline"
+        caveat from D-037, made concrete.
+
+        Args:
+            commands: Async iterator of ``WatchCommand`` (subscribe/unsubscribe).
+
+        Raises:
+            grpc.aio.AioRpcError: on transport/status failure. It surfaces when
+                iteration starts, so the caller can distinguish a pre-stream
+                failure from a mid-stream one (see the WebSocket bridge).
+        """
+        async for update in self._stub.WatchStock(commands):
+            yield update

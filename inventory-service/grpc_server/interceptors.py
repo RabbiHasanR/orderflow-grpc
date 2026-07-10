@@ -18,14 +18,16 @@ def _abort_handler(
     """Build an aborting handler of the *same RPC kind* as ``handler``.
 
     The replacement must match the real handler's kind (unary-unary,
-    stream-unary, or unary-stream) or gRPC mis-dispatches it, so we branch on
-    ``handler``. ``context.abort`` raises, so the same ``terminate`` works for a
-    streaming handler too — it aborts before yielding anything.
+    stream-unary, unary-stream, or stream-stream) or gRPC mis-dispatches it, so we
+    branch on ``handler``. ``context.abort`` raises, so the same ``terminate``
+    works for a streaming handler too — it aborts before yielding anything.
     """
 
     def terminate(request: object, context: grpc.ServicerContext) -> None:
         context.abort(code, details)
 
+    if handler.stream_stream:
+        return grpc.stream_stream_rpc_method_handler(terminate)
     if handler.stream_unary:
         return grpc.stream_unary_rpc_method_handler(terminate)
     if handler.unary_stream:
@@ -125,8 +127,11 @@ class LoggingInterceptor(grpc.ServerInterceptor):
             return wrapper
 
         # Handle the RPC kinds this service exposes: unary-unary (ReserveStock),
-        # stream-unary (ReserveStockBulk), and unary-stream (WatchLowStock).
-        # Other kinds pass through unwrapped.
+        # stream-unary (ReserveStockBulk), unary-stream (WatchLowStock), and
+        # stream-stream (WatchStock). Other kinds pass through unwrapped. Both
+        # response-streaming kinds reuse ``timed_stream`` — its wrapper iterates
+        # the response generator regardless of whether the request was one message
+        # or an iterator.
         if handler.unary_unary:
             return grpc.unary_unary_rpc_method_handler(
                 timed(handler.unary_unary),
@@ -142,6 +147,12 @@ class LoggingInterceptor(grpc.ServerInterceptor):
         if handler.unary_stream:
             return grpc.unary_stream_rpc_method_handler(
                 timed_stream(handler.unary_stream),
+                request_deserializer=handler.request_deserializer,
+                response_serializer=handler.response_serializer,
+            )
+        if handler.stream_stream:
+            return grpc.stream_stream_rpc_method_handler(
+                timed_stream(handler.stream_stream),
                 request_deserializer=handler.request_deserializer,
                 response_serializer=handler.response_serializer,
             )

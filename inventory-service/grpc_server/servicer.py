@@ -5,13 +5,21 @@ lives in ``inventory_app.services``. Business outcomes (insufficient stock,
 unknown product, non-positive quantity) are returned as ``success=False`` with
 per-item reasons; gRPC error statuses are reserved for malformed requests.
 """
+import threading
+import time
 from collections.abc import Iterator
 
 import grpc
+from django.conf import settings
 
 from generated import order_inventory_pb2 as pb2
 from generated import order_inventory_pb2_grpc as pb2_grpc
-from inventory_app.services import ReserveItem, reserve_stock, stream_low_stock
+from inventory_app.services import (
+    ReserveItem,
+    fetch_stock,
+    reserve_stock,
+    stream_low_stock,
+)
 
 
 class InventoryServicer(pb2_grpc.InventoryServiceServicer):
@@ -128,3 +136,86 @@ class InventoryServicer(pb2_grpc.InventoryServiceServicer):
                 name=row.name,
                 available_quantity=row.available_quantity,
             )
+
+    def WatchStock(
+        self,
+        request_iterator: Iterator[pb2.WatchCommand],
+        context: grpc.ServicerContext,
+    ) -> Iterator[pb2.StockUpdate]:
+        """Bidirectional: subscribe/unsubscribe in, live stock updates out.
+
+        The two streams are **independent** — this is what separates bidi from the
+        other three shapes. On a *sync* server (D-021) one thread cannot both
+        block on ``for cmd in request_iterator`` and poll+``yield`` responses, so
+        we split the duplex across two threads:
+
+          * a **background reader thread** drains ``request_iterator``, mutating a
+            shared ``watch_set`` (subscribe adds, unsubscribe removes) under a lock
+            and marking freshly-subscribed ids for an immediate snapshot;
+          * **this generator** (running on the RPC's own pool thread) polls the
+            current watch set every ``GRPC_WATCH_POLL_SECONDS``, emitting a
+            ``SNAPSHOT`` for newly-added ids and a ``CHANGED`` for any watched
+            product whose ``available_quantity`` differs from the last value sent.
+
+        Teardown is client-driven (there is no deadline on a live watch): the loop
+        exits when the request stream ends (reader sets ``stop``) or the client
+        cancels (``context.is_active()`` goes False).
+        """
+        watch_set: set[int] = set()
+        newly_added: set[int] = set()
+        last_seen: dict[int, int] = {}
+        lock = threading.Lock()
+        stop = threading.Event()
+
+        def _drain_commands() -> None:
+            """Consume the request stream, reshaping the shared watch set."""
+            try:
+                for command in request_iterator:
+                    ids = set(command.product_ids)
+                    with lock:
+                        if command.action == pb2.WatchCommand.SUBSCRIBE:
+                            watch_set.update(ids)
+                            newly_added.update(ids)  # snapshot on next tick
+                        else:  # UNSUBSCRIBE
+                            watch_set.difference_update(ids)
+                            newly_added.difference_update(ids)
+            finally:
+                stop.set()  # request stream closed → tell the poll loop to finish
+
+        reader = threading.Thread(target=_drain_commands, daemon=True)
+        reader.start()
+
+        poll_seconds = settings.GRPC_WATCH_POLL_SECONDS
+        try:
+            while context.is_active() and not stop.is_set():
+                # Copy-and-clear the shared state atomically so the reader thread
+                # never mutates it mid-tick.
+                with lock:
+                    watched = set(watch_set)
+                    fresh = set(newly_added)
+                    newly_added.clear()
+                    # Forget quantities for ids no longer watched (a later
+                    # re-subscribe then re-snapshots from scratch).
+                    for pid in list(last_seen):
+                        if pid not in watched:
+                            del last_seen[pid]
+
+                for row in fetch_stock(watched):
+                    if row.product_id in fresh:
+                        kind = pb2.StockUpdate.SNAPSHOT
+                    elif last_seen.get(row.product_id) != row.available_quantity:
+                        kind = pb2.StockUpdate.CHANGED
+                    else:
+                        continue  # unchanged and already snapshotted → stay quiet
+                    last_seen[row.product_id] = row.available_quantity
+                    yield pb2.StockUpdate(
+                        product_id=row.product_id,
+                        sku=row.sku,
+                        name=row.name,
+                        available_quantity=row.available_quantity,
+                        kind=kind,
+                    )
+
+                stop.wait(poll_seconds)  # wake early if the request stream closes
+        finally:
+            stop.set()  # ensure the reader unblocks even if the client cancelled

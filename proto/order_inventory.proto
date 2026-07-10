@@ -6,10 +6,11 @@ syntax = "proto3";
 // generated output.
 package orderflow.inventory.v1;
 
-// Three RPC shapes over the same inventory:
+// Four RPC shapes over the same inventory:
 //   - ReserveStock: unary, one order, all-or-nothing (workflow.md).
 //   - ReserveStockBulk: client-streaming, MANY orders, best-effort per item.
 //   - WatchLowStock: server-streaming, read-only low-stock query.
+//   - WatchStock: bidirectional-streaming, read-only live stock subscription.
 service InventoryService {
   // Atomically reserve stock for an order, all-or-nothing. Maps 1:1 onto the
   // inventory service layer's reserve_stock(order_ref, items) function.
@@ -27,6 +28,14 @@ service InventoryService {
   // a time, straight from a DB cursor — no big list is buffered on either side.
   // An empty result is a valid zero-message stream, not an error.
   rpc WatchLowStock(LowStockQuery) returns (stream ProductStock);
+
+  // Bidirectional-streaming: client streams subscribe/unsubscribe commands, the
+  // server independently streams stock updates for the CURRENT watch set — a
+  // SNAPSHOT when a product is subscribed, then a fresh value each time a watched
+  // product changes (detected on a poll tick). The two streams are decoupled:
+  // responses are NOT 1:1 with requests, and both flow concurrently over one
+  // long-lived call. Read-only; the reservation write-path is untouched.
+  rpc WatchStock(stream WatchCommand) returns (stream StockUpdate);
 }
 
 // One requested line: reserve `quantity` of product `product_id`.
@@ -100,4 +109,31 @@ message ProductStock {
   string sku = 2;
   string name = 3;
   int32 available_quantity = 4;
+}
+
+// One command on the WatchStock request stream: add or remove product ids from
+// the server-side watch set. The client sends these whenever it wants — they are
+// not answered one-for-one; they reshape what the response stream emits.
+message WatchCommand {
+  enum Action {
+    SUBSCRIBE = 0;    // add product_ids to the watch set (emit a snapshot each)
+    UNSUBSCRIBE = 1;  // remove product_ids from the watch set
+  }
+  Action action = 1;
+  repeated int64 product_ids = 2;
+}
+
+// One streamed message on the WatchStock response stream.
+message StockUpdate {
+  // Why this update was emitted: an initial value on subscribe, or a later
+  // change picked up on a poll tick.
+  enum Kind {
+    SNAPSHOT = 0;  // first value sent right after a product is subscribed
+    CHANGED = 1;   // available_quantity differs from the last value we sent
+  }
+  int64 product_id = 1;
+  string sku = 2;
+  string name = 3;
+  int32 available_quantity = 4;
+  Kind kind = 5;
 }

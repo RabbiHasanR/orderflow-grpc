@@ -58,3 +58,6 @@ USE_TZ = True
 GRPC_AUTH_TOKEN = os.environ.get("GRPC_AUTH_TOKEN", "")
 GRPC_PORT = os.environ.get("GRPC_PORT", "50051")
 GRPC_MAX_WORKERS = int(os.environ.get("GRPC_MAX_WORKERS", "10"))
+# Seconds between polls of the WatchStock watch set (bidirectional stream). Each
+# tick re-reads the subscribed products and emits only what changed.
+GRPC_WATCH_POLL_SECONDS = float(os.environ.get("GRPC_WATCH_POLL_SECONDS", "2.0"))

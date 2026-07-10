@@ -6,7 +6,7 @@ concurrent orders cannot both read the same quantity and oversell. Reservation
 is all-or-nothing: any unsatisfiable line rolls back the whole batch, but a
 per-item breakdown is still returned.
 """
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 
 from django.db import transaction
@@ -117,6 +117,16 @@ def reserve_stock(order_ref: str, items: Sequence[ReserveItem]) -> ReservationOu
     return ReservationOutcome(success=all_ok, results=outcomes)
 
 
+def _to_row(product: Product) -> ProductStockRow:
+    """Map a ``Product`` model to the framework-agnostic :class:`ProductStockRow`."""
+    return ProductStockRow(
+        product_id=product.pk,
+        sku=product.sku,
+        name=product.name,
+        available_quantity=product.available_quantity,
+    )
+
+
 def stream_low_stock(
     threshold: int, sku_prefix: str = ""
 ) -> Iterator[ProductStockRow]:
@@ -139,9 +149,26 @@ def stream_low_stock(
         products = products.filter(sku__startswith=sku_prefix)
 
     for product in products.order_by("sku").iterator():
-        yield ProductStockRow(
-            product_id=product.pk,
-            sku=product.sku,
-            name=product.name,
-            available_quantity=product.available_quantity,
-        )
+        yield _to_row(product)
+
+
+def fetch_stock(product_ids: Iterable[int]) -> list[ProductStockRow]:
+    """Return the current stock for a set of product ids (read-only snapshot).
+
+    Unlike :func:`stream_low_stock` this is a bounded point-in-time read of an
+    explicit id set — it backs the bidirectional ``WatchStock`` RPC, which polls
+    the current watch set each tick. Unknown ids are simply absent from the
+    result (no error), matching the read-only, best-effort nature of a watch.
+
+    Args:
+        product_ids: The ids currently subscribed; an empty set yields ``[]``.
+
+    Returns:
+        One :class:`ProductStockRow` per existing product, ordered by SKU.
+    """
+    ids = list(product_ids)
+    if not ids:
+        return []
+
+    products = Product.objects.filter(pk__in=ids).order_by("sku")
+    return [_to_row(product) for product in products]

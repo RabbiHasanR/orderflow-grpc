@@ -20,5 +20,6 @@ IDs are zero-padded 3-digit, mirroring the `D-NNN` scheme in `decisions.md`.
 | [004](004-order-service-restructure.md) | Order-service domain layout + Alembic | order-service | in-progress | Domain-module layout (`core`/`api`/`modules/orders`) + Alembic migrations replacing startup `create_all` (D-035) |
 | [005](005-bulk-reserve-stream.md) | Bulk reserve stock (client-streaming) | both | in-progress | Client-streaming `ReserveStockBulk` (many orders, best-effort per item) + `POST /orders/bulk` (D-036) |
 | [006](006-watch-low-stock-stream.md) | Watch low stock (server-streaming) | both | in-progress | Server-streaming `WatchLowStock` (low-stock query) re-streamed as NDJSON at `GET /inventory/low-stock` (D-037) |
+| [007](007-live-stock-watch-bidi.md) | Live stock watch (bidirectional-streaming) | both | in-progress | Bidirectional `WatchStock` (dynamic subscribe/unsubscribe ↔ live stock updates) fronted at WebSocket `/inventory/stock-watch` + demo page (D-038) |
 
-<!-- Next free ID: 007 -->
+<!-- Next free ID: 008 -->
