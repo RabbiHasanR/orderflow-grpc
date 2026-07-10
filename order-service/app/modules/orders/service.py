@@ -36,11 +36,29 @@ class OrderService:
         session: AsyncSession,
         inventory: InventoryClient,
         payload: OrderCreate,
+        idempotency_key: str | None = None,
     ) -> Order:
-        """Reserve stock over gRPC, then persist the order only if it succeeded."""
-        # Generate the id up front: it is the order_ref inventory stores, and must
-        # exist before the RPC (workflow.md step 3).
-        order_ref = str(uuid4())
+        """Reserve stock over gRPC, then persist the order only if it succeeded.
+
+        Idempotent when the caller supplies an ``idempotency_key`` (the
+        ``Idempotency-Key`` header): the key doubles as the order id, so a retry
+        returns the already-persisted order instead of reserving again, and the
+        same key is forwarded to inventory as a second line of defence. If the
+        order fails to persist *after* a successful reserve, we compensate with
+        ``ReleaseStock`` so held stock is not stranded (the reserve-then-persist
+        saga's rollback).
+        """
+        # The key doubles as the order id / order_ref (workflow.md step 3). Without
+        # one, fall back to a fresh uuid4 — a single call is still safe, but retries
+        # can't be deduped (that needs a client-supplied key).
+        order_ref = idempotency_key or str(uuid4())
+
+        # Idempotent short-circuit: this key already produced a persisted order.
+        existing = await session.get(Order, order_ref)
+        if existing is not None:
+            logger.info("order %s already exists — idempotent replay", order_ref)
+            return existing
+
         order = Order(
             id=order_ref,
             items=[
@@ -51,7 +69,9 @@ class OrderService:
         line_items = [(i.product_id, i.quantity) for i in payload.items]
 
         try:
-            response = await inventory.reserve_stock(order_ref=order_ref, items=line_items)
+            response = await inventory.reserve_stock(
+                order_ref=order_ref, items=line_items, idempotency_key=order_ref
+            )
         except grpc.aio.AioRpcError as exc:
             http_status = grpc_to_http_status(exc.code())
             logger.warning("ReserveStock failed: %s → HTTP %s", exc.code(), http_status)
@@ -73,11 +93,36 @@ class OrderService:
                 detail={"message": "stock reservation failed", "results": reasons},
             )
 
-        session.add(order)
-        await session.commit()
-        await session.refresh(order)
+        try:
+            session.add(order)
+            await session.commit()
+            await session.refresh(order)
+        except Exception:
+            # Reserve succeeded but we couldn't persist the order — compensate so
+            # the reserved stock is returned instead of stranded (D-036 fix).
+            await session.rollback()
+            await OrderService._release_quietly(inventory, order_ref)
+            logger.exception("persist failed after reserve; released %s", order_ref)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="failed to persist order",
+            )
+
         logger.info("order %s created (%d items)", order.id, len(line_items))
         return order
+
+    @staticmethod
+    async def _release_quietly(inventory: InventoryClient, order_ref: str) -> None:
+        """Best-effort ``ReleaseStock`` compensation; never raise over a failure.
+
+        If the release itself fails (inventory down), we log and move on rather
+        than masking the original error — the reservation is left for a future
+        reconciliation sweep (a documented follow-on, Phase 6).
+        """
+        try:
+            await inventory.release_stock(order_ref)
+        except grpc.aio.AioRpcError as exc:
+            logger.error("compensation ReleaseStock(%s) failed: %s", order_ref, exc.code())
 
     @staticmethod
     async def create_orders_bulk(
@@ -130,21 +175,30 @@ class OrderService:
 
         results: list[BulkOrderResult] = []
         persisted_count = 0
+        stranded_refs: list[str] = []
         for order in orders:
             items = outcomes_by_ref[order.id]
             if items and all(i.reserved for i in items):
                 session.add(order)
                 persisted_count += 1
                 order_status = "persisted"
+            elif any(i.reserved for i in items):
+                # Partial: some lines reserved but the order isn't saved, so those
+                # reserved lines would be stranded on inventory (D-036). Release them.
+                order_status = "partial"
+                stranded_refs.append(order.id)
             else:
-                # Partial or full failure: nothing saved on our side. A partial
-                # order leaves reserved stock stranded on inventory (D-036).
-                order_status = "failed" if not any(i.reserved for i in items) else "partial"
+                order_status = "failed"  # nothing reserved → nothing to release
             results.append(
                 BulkOrderResult(order_ref=order.id, status=order_status, items=items)
             )
 
         await session.commit()
+
+        # Compensate partial orders: return their stranded reserved stock. Done
+        # after the commit so a release failure can't roll back persisted orders.
+        for ref in stranded_refs:
+            await OrderService._release_quietly(inventory, ref)
         logger.info(
             "bulk orders: %d/%d persisted (%d lines)",
             persisted_count,

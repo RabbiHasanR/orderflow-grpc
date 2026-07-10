@@ -14,7 +14,18 @@ package orderflow.inventory.v1;
 service InventoryService {
   // Atomically reserve stock for an order, all-or-nothing. Maps 1:1 onto the
   // inventory service layer's reserve_stock(order_ref, items) function.
+  //
+  // Idempotent: a retry carrying the same idempotency_key does NOT reserve twice
+  // — the server replays the original outcome. This is what makes a client-side
+  // retry (after a timeout) safe against overselling.
   rpc ReserveStock(ReserveStockRequest) returns (ReserveStockResponse);
+
+  // Compensating action for the reserve-then-persist saga: release a previously
+  // reserved order, adding its quantities back to available stock. Called by
+  // order-service when it fails to persist the order after a successful reserve,
+  // so stock is not stranded. Idempotent — releasing an order with no active
+  // reservation (already released, or never reserved) is a no-op success.
+  rpc ReleaseStock(ReleaseStockRequest) returns (ReleaseStockResponse);
 
   // Client-streaming: reserve lines across MANY orders, best-effort per item.
   // The client streams one BulkReserveItem per line; the server reserves each
@@ -52,6 +63,25 @@ message ReserveStockRequest {
   // reference stored on each StockReservation (no FK across services).
   string order_ref = 1;
   repeated ReserveItem items = 2;
+  // Stable key identifying this logical reserve attempt. A client retry after a
+  // timeout MUST resend the same key; the server then replays the original
+  // outcome instead of decrementing stock again. order-service derives it from
+  // the `Idempotency-Key` HTTP header (falling back to order_ref). Empty string
+  // disables dedup (single-shot semantics).
+  string idempotency_key = 3;
+}
+
+// Identify a reservation to release. All still-RESERVED lines for this order_ref
+// are released (quantities returned to stock, rows marked RELEASED).
+message ReleaseStockRequest {
+  string order_ref = 1;
+}
+
+message ReleaseStockResponse {
+  // True if at least one reserved line was released by this call.
+  bool released = 1;
+  // How many reservation lines were released (0 = nothing was still reserved).
+  int32 released_count = 2;
 }
 
 // Per-item result. `reason` is empty when `reserved` is true.

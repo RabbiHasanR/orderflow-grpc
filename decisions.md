@@ -397,3 +397,67 @@ recovers missed changes and replaces the poll's implicit self-healing.
 app-level `pg_notify` (rejected — misses non-`reserve_stock` writers); in-memory
 bus (rejected — doesn't survive multi-replica); Redis/Kafka (rejected — real
 change-feed infra, unjustified at this scale when Postgres already has the bus).
+
+### D-040 — Idempotent `ReserveStock` + `ReleaseStock` compensation
+**Date:** 2026-07-11
+**Decision:** Make the reserve path safe under retries and crashes for multi-replica
+production. `ReserveStock` gains an `idempotency_key`; `StockReservation` stores it
+with a **partial unique index** (`status=RESERVED` AND non-empty key). `reserve_stock`
+replays the original outcome when the key already has an active reservation, so a
+client retry after a timeout can't double-decrement. A new `ReleaseStock(order_ref)`
+RPC returns stock (atomic `F()` add-back, rows flipped `RELEASED`) and is idempotent;
+order-service calls it to compensate when it fails to persist an order after a
+successful reserve, and for bulk `partial` orders. order-service uses the
+`Idempotency-Key` header as the order id (`order_ref = idempotency_key`), so the
+order layer short-circuits duplicates too. See [spec 009](specs/009-production-multireplica-hardening.md).
+**Why replay + a partial unique index (belt and braces):** the replay check handles
+the common case (a sequential retry after the original committed); the unique index
+is the hard backstop for a rare *concurrent* duplicate — the loser hits `IntegrityError`,
+rolls back with no stock moved, and its retry replays the winner. Neither alone is
+sufficient (replay races; a bare constraint gives no replay), together they never oversell.
+**Why scope the index to `RESERVED` + non-empty:** a released key must be reservable
+again (a legitimate re-order after compensation), and keyless single-shot reservations
+must not collide on `''`.
+**Why compensation (not a full outbox/saga):** closes the D-036 orphaned-reservation
+gap with far less machinery; a reconciliation sweep for the crash-mid-compensation
+window is deferred (Phase 6). Chosen over "idempotency only" (leaves stranded stock)
+and "full outbox+saga" (overkill for this scale) — see the approved plan.
+**Also:** `reserve_stock` now locks product rows in `product_id` order so two orders
+touching the same products in opposite order can't deadlock.
+
+### D-041 — Migrations run in a one-shot job, not the app entrypoint
+**Date:** 2026-07-11
+**Decision:** Move `manage.py migrate` / `alembic upgrade head` out of the container
+entrypoints into dedicated one-shot compose services (`inventory-migrate`,
+`order-migrate`, `restart: "no"`). App replicas wait on them via
+`depends_on: { condition: service_completed_successfully }`. Entrypoints are now pure
+`exec "$@"` handoffs. This is the concrete unblock for D-026: with migrations gone
+from the entrypoint, `docker compose up --scale inventory-service=N` no longer races
+`migrate` on the shared DB.
+**Why reuse the app image (shared `image:` tag, override `command`):** the migrate
+job needs the exact same code/deps/migrations as the app; a shared tag builds the
+image once and guarantees they never drift.
+**Alternatives:** advisory-lock the migration in-entrypoint (rejected — still N
+concurrent `CREATE TRIGGER`/DDL attempts, fragile); a separate migration image
+(rejected — drift risk, extra build).
+
+### D-042 — gRPC health service, client retries, and keepalive
+**Date:** 2026-07-11
+**Decision:** Add production resilience for a fleet behind round-robin. inventory
+registers the standard `grpc.health.v1` service (own tiny thread pool), reports
+`SERVING`, and flips to `NOT_SERVING` on graceful shutdown; the container probe now
+queries it (`python -m grpc_server.healthcheck`) instead of a bare TCP connect, and
+it is **auth-exempt** so probes/LBs need no secret. The client adds a `retryPolicy`
+(retry `ReserveStock`/`ReleaseStock` on `UNAVAILABLE`, `grpc.enable_retries`) and
+keepalive pings (30s, permit-without-calls); the server permits pings that frequent.
+order-service exposes `/readyz` (DB + channel, `503` when degraded) and `order-service`
+now waits for inventory `service_healthy`. See [spec 009](specs/009-production-multireplica-hardening.md).
+**Why retries are safe now:** only the idempotent unary calls are retried (D-040);
+streaming and business-reject paths are excluded so a retry can't replay a stream or
+mask a `success=False`.
+**Why keepalive:** a long-lived idle `WatchStock` stream (no in-flight data) would be
+dropped by NAT/LB idle timeouts; pinging keeps it alive. Server ping-permit options
+avoid a `too_many_pings` GOAWAY.
+**Why liveness (`/healthz`) stays dependency-free while readiness (`/readyz`) checks
+deps:** a transient DB blip should mark a replica *not ready* (route around it), not
+kill it in a restart loop.

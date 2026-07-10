@@ -18,6 +18,7 @@ from grpc_server.notifications import listen_stock_changes
 from inventory_app.services import (
     ReserveItem,
     fetch_stock,
+    release_stock,
     reserve_stock,
     stream_low_stock,
 )
@@ -41,7 +42,11 @@ class InventoryServicer(pb2_grpc.InventoryServiceServicer):
             ReserveItem(product_id=item.product_id, quantity=item.quantity)
             for item in request.items
         ]
-        outcome = reserve_stock(order_ref=request.order_ref, items=items)
+        outcome = reserve_stock(
+            order_ref=request.order_ref,
+            items=items,
+            idempotency_key=request.idempotency_key,
+        )
 
         return pb2.ReserveStockResponse(
             success=outcome.success,
@@ -53,6 +58,21 @@ class InventoryServicer(pb2_grpc.InventoryServiceServicer):
                 )
                 for result in outcome.results
             ],
+        )
+
+    def ReleaseStock(
+        self,
+        request: pb2.ReleaseStockRequest,
+        context: grpc.ServicerContext,
+    ) -> pb2.ReleaseStockResponse:
+        """Release a previously reserved order, returning its stock (compensation)."""
+        if not request.order_ref:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "order_ref is required")
+
+        outcome = release_stock(order_ref=request.order_ref)
+        return pb2.ReleaseStockResponse(
+            released=outcome.released,
+            released_count=outcome.released_count,
         )
 
     def ReserveStockBulk(

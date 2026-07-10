@@ -62,9 +62,10 @@ USER app
 
 EXPOSE 8000
 
-# HTTP liveness probe against the health endpoint (order-service speaks HTTP).
+# Readiness probe: /readyz returns 200 only when the DB and inventory channel are
+# usable (503 otherwise), so "healthy" means this replica can actually serve.
 HEALTHCHECK --interval=15s --timeout=3s --start-period=15s --retries=3 \
-    CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).status==200 else 1)"]
+    CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2).status==200 else 1)"]
 
 ENTRYPOINT ["./docker-entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

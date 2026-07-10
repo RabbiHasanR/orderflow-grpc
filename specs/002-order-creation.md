@@ -51,10 +51,11 @@ a foreign key. order-service is currently a stub; this spec covers building it.
   `quantity`, so there is no price data to total. A future field once a catalog/
   pricing source exists; the `status` column is kept for future `PENDING`→
   `CONFIRMED` saga states.
-- **Known gap (out of scope for v1):** reservation commits in inventory *before*
-  the order is persisted; a failure after commit leaves an orphaned reservation.
-  The future fix is a saga/outbox using the existing `StockReservation.RELEASED`
-  status. Tracked here so it isn't forgotten.
+- **~~Known gap~~ (now addressed in spec [009](009-production-multireplica-hardening.md), D-040):**
+  reservation commits in inventory *before* the order is persisted; a failure
+  after commit used to leave an orphaned reservation. `create_order` now
+  compensates with `ReleaseStock` on persist failure, and the reserve is
+  idempotent (`Idempotency-Key`), so a retry no longer double-reserves.
 
 ## Tasks
 
@@ -66,8 +67,8 @@ a foreign key. order-service is currently a stub; this spec covers building it.
 - [done] `POST /orders` handler: generate id → reserve → persist-or-map-error
 - [done] failure mapping (`409` / `503` / `504` / `502`)
 - [done] `docker-compose.yml` wiring (order-db + order-service, only 8000 published)
-- [todo] add 2nd inventory replica + one-shot migrate job; verify round-robin
-  across replicas (D-026 follow-up — channel is already round-robin-ready)
+- [done] one-shot migrate job unblocks scaling (spec [009](009-production-multireplica-hardening.md), D-041)
+- [todo] verify round-robin across replicas end-to-end (`--scale inventory-service=3`)
 
 ## Changelog
 - 2026-06-29 — created; scoped from workflow.md `[todo]` items. order-service is stub-only today.

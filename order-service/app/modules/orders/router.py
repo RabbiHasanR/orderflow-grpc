@@ -1,7 +1,7 @@
 """HTTP adapter for orders — thin: resolve deps, call the service, return a model."""
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_session
@@ -24,9 +24,20 @@ async def create_order(
     payload: OrderCreate,
     session: Annotated[AsyncSession, Depends(get_session)],
     inventory: Annotated[InventoryClient, Depends(get_inventory)],
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> Order:
-    """Reserve stock over gRPC, then persist the order only if it succeeded."""
-    return await OrderService.create_order(session, inventory, payload)
+    """Reserve stock over gRPC, then persist the order only if it succeeded.
+
+    Pass an ``Idempotency-Key`` header to make retries safe: the same key returns
+    the original order instead of reserving stock twice. The key doubles as the
+    order id, so it is bounded to inventory's 128-char ``order_ref`` limit.
+    """
+    if idempotency_key is not None and not 1 <= len(idempotency_key) <= 128:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Idempotency-Key must be 1–128 characters",
+        )
+    return await OrderService.create_order(session, inventory, payload, idempotency_key)
 
 
 @router.post("/bulk", response_model=BulkOrderOut, status_code=status.HTTP_200_OK)

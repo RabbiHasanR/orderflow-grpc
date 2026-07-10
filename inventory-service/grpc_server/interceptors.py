@@ -11,6 +11,11 @@ logger = logging.getLogger("inventory.grpc")
 # Shared with the order-service client interceptor (D-034).
 AUTH_METADATA_KEY = "x-auth-token"
 
+# The gRPC health-checking service is exempt from auth: liveness/readiness probes
+# (the container healthcheck, and any future external LB) must not need the app
+# secret to ask "are you serving?". Its methods all live under this prefix.
+_HEALTH_METHOD_PREFIX = "/grpc.health.v1.Health/"
+
 
 def _abort_handler(
     handler: grpc.RpcMethodHandler, code: grpc.StatusCode, details: str
@@ -48,6 +53,9 @@ class AuthInterceptor(grpc.ServerInterceptor):
         """Check the token metadata; pass through or return an aborting handler."""
         if not self._expected:
             return continuation(handler_call_details)  # dev: no token configured
+
+        if handler_call_details.method.startswith(_HEALTH_METHOD_PREFIX):
+            return continuation(handler_call_details)  # health probes bypass auth
 
         metadata = dict(handler_call_details.invocation_metadata or [])
         presented = metadata.get(AUTH_METADATA_KEY)

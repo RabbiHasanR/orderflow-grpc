@@ -65,10 +65,11 @@ USER app
 
 EXPOSE 50051
 
-# Lightweight liveness probe: the gRPC server registers no health service, so we
-# just confirm the listener accepts a TCP connection. No extra binaries needed.
-HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
-    CMD ["python", "-c", "import os,socket; socket.create_connection(('127.0.0.1', int(os.environ.get('GRPC_PORT','50051'))), 2).close()"]
+# Real readiness probe: query the grpc.health.v1 service (auth-exempt) and pass
+# only when it reports SERVING. A draining or wedged server fails this even with
+# the port open — the signal the round-robin client needs to route around it.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
+    CMD ["python", "-m", "grpc_server.healthcheck"]
 
 ENTRYPOINT ["./docker-entrypoint.sh"]
 CMD ["python", "-m", "grpc_server.server"]

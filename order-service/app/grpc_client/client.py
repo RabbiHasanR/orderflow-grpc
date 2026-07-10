@@ -3,6 +3,7 @@
 Uses ``grpc.aio`` (D-030) with client-side ``round_robin`` load balancing over a
 ``dns:///`` target, so scaling inventory replicas needs no code change.
 """
+import json
 import logging
 from collections.abc import AsyncIterator
 
@@ -16,17 +17,53 @@ from app.generated import order_inventory_pb2_grpc as pb2_grpc
 
 logger = logging.getLogger("order.grpc")
 
-# Load-balance across all resolved addresses instead of the default pick_first.
-_ROUND_ROBIN_SERVICE_CONFIG = '{"loadBalancingConfig":[{"round_robin":{}}]}'
+_SERVICE = "orderflow.inventory.v1.InventoryService"
+
+# Channel service config:
+#  * round_robin — balance across every replica IP dns:/// resolves (not pick_first).
+#  * retryPolicy — transparently retry ReserveStock/ReleaseStock on UNAVAILABLE
+#    (a replica cycling), so a blip during --scale/rollout doesn't reach the user.
+#    Safe ONLY because these calls are idempotent (idempotency_key / release is a
+#    no-op replay). The streaming + business-reject paths are deliberately excluded.
+_SERVICE_CONFIG = json.dumps(
+    {
+        "loadBalancingConfig": [{"round_robin": {}}],
+        "methodConfig": [
+            {
+                "name": [
+                    {"service": _SERVICE, "method": "ReserveStock"},
+                    {"service": _SERVICE, "method": "ReleaseStock"},
+                ],
+                "retryPolicy": {
+                    "maxAttempts": 4,
+                    "initialBackoff": "0.1s",
+                    "maxBackoff": "1s",
+                    "backoffMultiplier": 2,
+                    "retryableStatusCodes": ["UNAVAILABLE"],
+                },
+            }
+        ],
+    }
+)
 
 
 def build_channel(settings: Settings) -> Channel:
     """Create the round-robin ``grpc.aio`` channel with the auth interceptor."""
     # dns:/// so the resolver returns all replica IPs and re-resolves over time.
     target = f"dns:///{settings.inventory_targets[0]}"
-    options = [("grpc.service_config", _ROUND_ROBIN_SERVICE_CONFIG)]
+    options = [
+        ("grpc.service_config", _SERVICE_CONFIG),
+        ("grpc.enable_retries", 1),
+        # Keepalive so a long-lived, idle WatchStock stream isn't silently dropped
+        # by a NAT/LB idle timeout: ping every 30s even with no in-flight calls.
+        # The server permits pings this frequent (see grpc_server/server.py).
+        ("grpc.keepalive_time_ms", 30000),
+        ("grpc.keepalive_timeout_ms", 10000),
+        ("grpc.keepalive_permit_without_calls", 1),
+        ("grpc.http2.max_pings_without_data", 0),
+    ]
 
-    logger.info("inventory gRPC channel → %s (round_robin)", target)
+    logger.info("inventory gRPC channel → %s (round_robin, retries, keepalive)", target)
     return grpc.aio.insecure_channel(  # internal network; TLS is a future extension
         target,
         options=options,
@@ -43,18 +80,30 @@ class InventoryClient:
         self._deadline = deadline_seconds
 
     async def reserve_stock(
-        self, order_ref: str, items: list[tuple[int, int]]
+        self, order_ref: str, items: list[tuple[int, int]], idempotency_key: str = ""
     ) -> pb2.ReserveStockResponse:
         """Call ``ReserveStock`` for one order.
 
-        Raises ``grpc.aio.AioRpcError`` on transport/status failure (mapped to
-        HTTP by the caller).
+        ``idempotency_key`` makes a retry safe: inventory replays the original
+        outcome instead of reserving twice. Raises ``grpc.aio.AioRpcError`` on
+        transport/status failure (mapped to HTTP by the caller).
         """
         request = pb2.ReserveStockRequest(
             order_ref=order_ref,
             items=[pb2.ReserveItem(product_id=pid, quantity=qty) for pid, qty in items],
+            idempotency_key=idempotency_key,
         )
         return await self._stub.ReserveStock(request, timeout=self._deadline)
+
+    async def release_stock(self, order_ref: str) -> pb2.ReleaseStockResponse:
+        """Call ``ReleaseStock`` to return a reserved order's stock (compensation).
+
+        Used when the order fails to persist after a successful reserve, so held
+        stock is not stranded. Idempotent server-side. Raises
+        ``grpc.aio.AioRpcError`` on transport/status failure.
+        """
+        request = pb2.ReleaseStockRequest(order_ref=order_ref)
+        return await self._stub.ReleaseStock(request, timeout=self._deadline)
 
     async def reserve_stock_bulk(
         self, lines: list[tuple[str, int, int]]

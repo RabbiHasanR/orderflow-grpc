@@ -1,10 +1,15 @@
 # OrderFlow gRPC — Compose stack.
 #
-# SCOPE (this phase): order-service (public REST edge, gRPC client) + its order-db,
-# plus the existing inventory-service (gRPC server) + inventory-db. Still a SINGLE
-# inventory replica (D-026); the 2nd replica + one-shot migrate job for the
-# round-robin demo come later. The client channel is already round_robin-ready, so
-# that is a runtime change (e.g. `--scale`), not a code change.
+# SCOPE: order-service (public REST edge, gRPC client) + its order-db, plus
+# inventory-service (gRPC server) + inventory-db. Multi-replica ready: the client
+# channel is round_robin over `dns:///`, so scale inventory at runtime with
+#   docker compose up --build --scale inventory-service=3
+#
+# Migrations run ONCE in the dedicated `*-migrate` one-shot services (D-026): the
+# app containers no longer migrate on boot, so N replicas can't race `migrate` /
+# `alembic upgrade` on the shared DB. Each migrate service reuses its app's built
+# image (shared `image:` tag) and just overrides `command`; the app waits for it
+# via `depends_on: { condition: service_completed_successfully }`.
 #
 # Per the architecture: gRPC backends are INTERNAL ONLY — only order-service:8000
 # is published to the host. All secrets/config come from .env (see .env.example);
@@ -30,11 +35,32 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  inventory-service:
+  # One-shot migration job — runs `manage.py migrate` once and exits. The app
+  # replicas wait on this via `service_completed_successfully`, so no replica ever
+  # races migrations on the shared inventory-db (D-026). Reuses the app image.
+  inventory-migrate:
     build:
       context: ./inventory-service
-    # Single replica for now (D-026): migrations run in the entrypoint, so a 2nd
-    # replica would race `migrate`. Round-robin LB is a later phase.
+    image: orderflow-inventory:latest
+    command: ["python", "manage.py", "migrate", "--noinput"]
+    env_file:
+      - .env
+    environment:
+      # Same DB wiring the app uses (POSTGRES_HOST must match the db service name).
+      POSTGRES_HOST: inventory-db
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${INVENTORY_POSTGRES_DB:-inventory}
+      POSTGRES_USER: ${INVENTORY_POSTGRES_USER:-inventory}
+      POSTGRES_PASSWORD: ${INVENTORY_POSTGRES_PASSWORD:?INVENTORY_POSTGRES_PASSWORD is required}
+    depends_on:
+      inventory-db:
+        condition: service_healthy
+    restart: "no"
+
+  inventory-service:
+    # Reuses the image built by inventory-migrate (same build context + tag), so
+    # the image is built once. Safe to scale: `--scale inventory-service=N`.
+    image: orderflow-inventory:latest
     env_file:
       - .env
     environment:
@@ -49,6 +75,8 @@ services:
     depends_on:
       inventory-db:
         condition: service_healthy
+      inventory-migrate:
+        condition: service_completed_successfully
     # No `ports:` — the gRPC server stays internal to the compose network.
     # Reachable as `inventory-service:50051` from other services on the network.
     restart: unless-stopped
@@ -70,9 +98,29 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  order-service:
+  # One-shot Alembic migration job — runs `alembic upgrade head` once and exits,
+  # so order-service replicas never race the schema upgrade on the shared order-db.
+  order-migrate:
     build:
       context: ./order-service
+    image: orderflow-order:latest
+    command: ["alembic", "upgrade", "head"]
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: order-db
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${ORDER_POSTGRES_DB:-orders}
+      POSTGRES_USER: ${ORDER_POSTGRES_USER:-orders}
+      POSTGRES_PASSWORD: ${ORDER_POSTGRES_PASSWORD:?ORDER_POSTGRES_PASSWORD is required}
+    depends_on:
+      order-db:
+        condition: service_healthy
+    restart: "no"
+
+  order-service:
+    # Reuses the image built by order-migrate (same build context + tag).
+    image: orderflow-order:latest
     # env_file supplies the shared GRPC_AUTH_TOKEN; the explicit `environment`
     # below overrides POSTGRES_* so order-service talks to its OWN order-db (not
     # inventory's) — compose `environment` wins over `env_file`.
@@ -84,7 +132,8 @@ services:
       POSTGRES_DB: ${ORDER_POSTGRES_DB:-orders}
       POSTGRES_USER: ${ORDER_POSTGRES_USER:-orders}
       POSTGRES_PASSWORD: ${ORDER_POSTGRES_PASSWORD:?ORDER_POSTGRES_PASSWORD is required}
-      # Client-side load balancing target(s). One replica today (D-026).
+      # Client-side load balancing target — `dns:///` resolves every inventory
+      # replica's IP and round-robins across them (scale with --scale).
       INVENTORY_GRPC_TARGETS: inventory-service:50051
     ports:
       # The ONLY host-published port in the whole stack (architecture §4).
@@ -92,8 +141,12 @@ services:
     depends_on:
       order-db:
         condition: service_healthy
+      order-migrate:
+        condition: service_completed_successfully
       inventory-service:
-        condition: service_started
+        # Wait until inventory reports SERVING via its gRPC health probe, not just
+        # "started" — so order-service never opens the channel before a backend is ready.
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
