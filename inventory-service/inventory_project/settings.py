@@ -58,6 +58,7 @@ USE_TZ = True
 GRPC_AUTH_TOKEN = os.environ.get("GRPC_AUTH_TOKEN", "")
 GRPC_PORT = os.environ.get("GRPC_PORT", "50051")
 GRPC_MAX_WORKERS = int(os.environ.get("GRPC_MAX_WORKERS", "10"))
-# Seconds between polls of the WatchStock watch set (bidirectional stream). Each
-# tick re-reads the subscribed products and emits only what changed.
-GRPC_WATCH_POLL_SECONDS = float(os.environ.get("GRPC_WATCH_POLL_SECONDS", "2.0"))
+# WatchStock (bidirectional) is push-based: updates come from Postgres NOTIFY,
+# not a poll (spec 008, D-039). This is only how often the helper threads wake to
+# re-check for shutdown while blocked — a responsiveness knob, not a data poll.
+GRPC_WATCH_TICK_SECONDS = float(os.environ.get("GRPC_WATCH_TICK_SECONDS", "1.0"))

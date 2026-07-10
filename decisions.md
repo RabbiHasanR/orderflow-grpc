@@ -347,10 +347,53 @@ holds **two** pool threads (handler + reader) for its whole lifetime, bounded by
 `GRPC_MAX_WORKERS`, and `server.stop(grace)` will not force-close long-lived
 streams (teardown is client-driven). A production system at scale would use an
 async server and/or a DB change-feed (LISTEN/NOTIFY) instead of per-watcher
-polling — deliberately out of scope here.
+polling — deliberately out of scope here. **Update:** the polling half of this
+was resolved in [D-039](#d-039) (push via LISTEN/NOTIFY); the two-threads-per-watch
+and sync-server points still stand.
 **Alternatives:** interactive reservation-session bidi (rejected — "ping-pong",
 one response per request, barely needs full-duplex and doesn't show stream
 independence); SSE + POST hybrid at the edge (rejected — two half-duplex channels
 to emulate what one WebSocket does honestly); gRPC-only with no HTTP edge
 (rejected — the WebSocket bridge is itself a realistic, testable production
 pattern worth demonstrating).
+
+### D-039 — Push-based `WatchStock` via Postgres LISTEN/NOTIFY (replaces polling)
+**Date:** 2026-07-10
+**Decision:** Replace `WatchStock`'s 2s DB poll with a **push / event-driven**
+change-feed. A Postgres `AFTER UPDATE OF available_quantity` trigger on
+`inventory_app_product` fires `pg_notify('stock_changed', '{product_id,
+available_quantity}')`; each `WatchStock` call holds its own **`LISTEN`
+connection** (per-call) and sleeps until a notification for a *watched* product
+arrives, then emits `CHANGED`. The gRPC contract and all order-service code
+(client, WebSocket bridge, demo) are **unchanged** — only the server's update
+engine changes. See [spec 008](specs/008-push-stock-updates.md).
+**Why push over poll:** polling issued idle queries every 2s and added up-to-2s
+latency; push does zero work while nothing changes and delivers near-instantly.
+This is the change-feed flagged as the fix in [D-038](#d-038).
+**Why a DB trigger (not app-level `pg_notify` in `reserve_stock`):** the trigger
+fires for **every** writer — the reserve path, a future restock, even a manual
+SQL `UPDATE` — so the DB stays the source of truth and no code path can forget to
+notify. Cost: some logic lives in SQL (a `RunSQL` migration).
+**Why a DB channel (not an in-memory Python event bus):** 1 replica today, but the
+architecture targets 2+ (D-026) with round-robin, so the process that changes
+stock is often not the one holding the watch stream. Both replicas share
+`inventory-db`, so `LISTEN/NOTIFY` crosses that gap; an in-memory event can't.
+No Redis/Kafka needed — `LISTEN/NOTIFY` is Postgres's built-in lightweight bus.
+**Why per-call LISTEN (not a shared process-wide listener):** simplest first cut,
+mirrors the existing per-call reader thread, one new concept at a time. Cost: one
+DB connection per watcher, bounded by Postgres's connection limit — fine at demo
+scale. The shared-listener + registry is the documented scale-up (future spec).
+**Concurrency:** the sync handler keeps the reader thread + `watch_set`/lock and
+adds a **listener thread**; three producers feed one `queue.Queue` the generator
+drains (`snapshot`/`changed`/`resync`). The listener uses a **raw psycopg3**
+autocommit connection (off the Django ORM, so LISTEN's long-lived blocking
+connection can't disturb thread-local ORM connections). `GRPC_WATCH_POLL_SECONDS`
+became `GRPC_WATCH_TICK_SECONDS` — now only a shutdown-responsiveness knob.
+**Correctness backstop:** NOTIFY is fire-and-forget, so a notification sent while
+the listener is reconnecting would be lost. On every (re)connect the listener
+emits a `resync` that re-reads the whole watch set and pushes any drift — this
+recovers missed changes and replaces the poll's implicit self-healing.
+**Alternatives:** keep polling (rejected — the whole point was to remove it);
+app-level `pg_notify` (rejected — misses non-`reserve_stock` writers); in-memory
+bus (rejected — doesn't survive multi-replica); Redis/Kafka (rejected — real
+change-feed infra, unjustified at this scale when Postgres already has the bus).
