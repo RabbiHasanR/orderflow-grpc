@@ -96,7 +96,9 @@ docker-compose `--scale` (not Kubernetes).
 - [done] Phase 3 — `/readyz` + compose `service_healthy` gating
 - [done] Phase 3 — nginx single edge; order-service internal → `--scale order-service=N` (D-043)
 - [done] Verify end-to-end with `docker compose up --build --scale inventory-service=3`
-- [todo] (later) Phases 4–6: observability, security/config hardening, tests
+- Follow-on (deferred, own specs): [010](010-observability.md) observability ·
+  [011](011-security-config-hardening.md) security/config hardening ·
+  [012](012-automated-tests.md) tests
 
 ## Changelog
 - 2026-07-11 — created; implements plan Phases 1–3 (migrate job, idempotency +
