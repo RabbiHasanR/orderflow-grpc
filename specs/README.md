@@ -22,6 +22,6 @@ IDs are zero-padded 3-digit, mirroring the `D-NNN` scheme in `decisions.md`.
 | [006](006-watch-low-stock-stream.md) | Watch low stock (server-streaming) | both | in-progress | Server-streaming `WatchLowStock` (low-stock query) re-streamed as NDJSON at `GET /inventory/low-stock` (D-037) |
 | [007](007-live-stock-watch-bidi.md) | Live stock watch (bidirectional-streaming) | both | in-progress | Bidirectional `WatchStock` (dynamic subscribe/unsubscribe ↔ live stock updates) fronted at WebSocket `/inventory/stock-watch` + demo page (D-038) |
 | [008](008-push-stock-updates.md) | Push-based stock updates (LISTEN/NOTIFY) | inventory-service | in-progress | `WatchStock` updates driven by a Postgres `stock_changed` trigger + per-call `LISTEN` instead of polling (D-039) |
-| [009](009-production-multireplica-hardening.md) | Production hardening for multi-replica scaling | both | in-progress | One-shot migrate job + idempotent `ReserveStock`/`ReleaseStock` compensation + gRPC health/retry/keepalive (D-040/D-041/D-042); code done, verification pending |
+| [009](009-production-multireplica-hardening.md) | Production hardening for multi-replica scaling | both | in-progress | One-shot migrate job + idempotent `ReserveStock`/`ReleaseStock` compensation + gRPC health/retry/keepalive + nginx single edge (D-040–D-043); verified end-to-end |
 
 <!-- Next free ID: 010 -->

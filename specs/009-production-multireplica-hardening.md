@@ -5,7 +5,7 @@ service: both
 status: in-progress
 created: 2026-07-11
 updated: 2026-07-11
-related: [architecture.md, "workflow.md", "proto/order_inventory.proto", "002-order-creation.md", "005-bulk-reserve-stream.md", "decisions.md#d-026", "decisions.md#d-036", "decisions.md#d-040", "decisions.md#d-041", "decisions.md#d-042"]
+related: [architecture.md, "workflow.md", "proto/order_inventory.proto", "002-order-creation.md", "005-bulk-reserve-stream.md", "decisions.md#d-026", "decisions.md#d-036", "decisions.md#d-040", "decisions.md#d-041", "decisions.md#d-042", "decisions.md#d-043"]
 ---
 
 ## Context / Why
@@ -76,6 +76,11 @@ docker-compose `--scale` (not Kubernetes).
   pool; `python -m grpc_server.healthcheck` probe; client `retryPolicy` in the
   service config + `grpc.enable_retries`; client keepalive (30s) with matching
   server ping-permit options; `/readyz` on FastAPI. (D-042)
+- **nginx edge:** order-service drops its published port and becomes internal;
+  an `nginx` service (`nginx/nginx.conf`) is the single published `:8000` edge and
+  L7 round-robins across order-service replicas, resolving them at runtime via
+  Docker DNS (variable `proxy_pass`). WS + NDJSON streaming pass through
+  (upgrade headers, `proxy_buffering off`). This unblocks `--scale order-service=N`. (D-043)
 
 ## Tasks
 
@@ -89,10 +94,15 @@ docker-compose `--scale` (not Kubernetes).
 - [done] Phase 3 — gRPC health service + real probe (auth-exempt)
 - [done] Phase 3 — client retry policy + keepalive (+ server ping-permit)
 - [done] Phase 3 — `/readyz` + compose `service_healthy` gating
-- [todo] Verify end-to-end with `docker compose up --build --scale inventory-service=3`
+- [done] Phase 3 — nginx single edge; order-service internal → `--scale order-service=N` (D-043)
+- [done] Verify end-to-end with `docker compose up --build --scale inventory-service=3`
 - [todo] (later) Phases 4–6: observability, security/config hardening, tests
 
 ## Changelog
 - 2026-07-11 — created; implements plan Phases 1–3 (migrate job, idempotency +
   release, health/retry/keepalive). Adds D-040/D-041/D-042. Supersedes the spec
-  002 / D-036 "orphaned reservation" known-gap. Verification pending.
+  002 / D-036 "orphaned reservation" known-gap. Verified with `--scale
+  inventory-service=3` (migrate once, all Healthy, idempotent decrement, release,
+  round-robin 3/3/4).
+- 2026-07-11 — added nginx as the single HTTP edge (D-043): order-service is now
+  internal and L7-load-balanced, so `--scale order-service=N` works behind one URL.

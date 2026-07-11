@@ -135,9 +135,9 @@ services:
       # Client-side load balancing target — `dns:///` resolves every inventory
       # replica's IP and round-robins across them (scale with --scale).
       INVENTORY_GRPC_TARGETS: inventory-service:50051
-    ports:
-      # The ONLY host-published port in the whole stack (architecture §4).
-      - "8000:8000"
+    # No `ports:` — order-service is now INTERNAL. nginx (below) is the single
+    # published edge and L7 load-balances across order-service replicas, so this
+    # can scale: `--scale order-service=N` (a host port here would collide).
     depends_on:
       order-db:
         condition: service_healthy
@@ -147,6 +147,28 @@ services:
         # Wait until inventory reports SERVING via its gRPC health probe, not just
         # "started" — so order-service never opens the channel before a backend is ready.
         condition: service_healthy
+    restart: unless-stopped
+
+  # --- public edge (L7 reverse proxy / load balancer) -------------------------
+  # The ONLY host-published port in the whole stack. nginx round-robins across all
+  # order-service replicas (resolved at runtime via Docker DNS, D-043), so the
+  # REST edge scales behind one stable URL: http://localhost:8000.
+  nginx:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "8000:80"
+    depends_on:
+      order-service:
+        condition: service_healthy
+    healthcheck:
+      # nginx's own liveness (independent of the backend) via the local endpoint.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost/nginx-health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
 
 volumes:

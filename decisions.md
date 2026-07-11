@@ -461,3 +461,27 @@ avoid a `too_many_pings` GOAWAY.
 **Why liveness (`/healthz`) stays dependency-free while readiness (`/readyz`) checks
 deps:** a transient DB blip should mark a replica *not ready* (route around it), not
 kill it in a restart loop.
+
+### D-043 — nginx as the single HTTP edge for a scaled order-service
+**Date:** 2026-07-11
+**Decision:** Put an **nginx** reverse proxy in front of order-service as the only
+host-published port (`:8000`). order-service drops its `8000:8000` mapping and becomes
+internal, so it can now be scaled (`--scale order-service=N`) — nginx L7 round-robins
+across the replicas behind one stable URL. This mirrors, at the REST edge, the
+client-side round-robin the gRPC client already does toward inventory. See
+[spec 009](specs/009-production-multireplica-hardening.md).
+**Why a proxy at all:** two order-service replicas can't both bind host port 8000; a
+single published port must fan out to N backends. nginx is the lightweight L7 LB.
+**Why the variable-`proxy_pass` + Docker-DNS pattern (not a static `upstream`):** a
+static `upstream { server order-service:8000; }` resolves the name **once at startup**
+and pins to a single replica — new/scaled replicas are never seen. Resolving at runtime
+via Docker's embedded DNS (`resolver 127.0.0.11`) with the host in a variable makes
+nginx re-resolve per the `valid` TTL, so it balances across all current replicas.
+`$request_uri` is appended explicitly (required when `proxy_pass` uses a variable).
+**Trade-off (accepted for demo scale):** balancing is at DNS-refresh granularity (~5s),
+not strictly per-request; a dedicated LB / service mesh gives per-request balancing.
+Streaming (NDJSON `/inventory/low-stock`, WS `/inventory/stock-watch`) is preserved with
+`proxy_buffering off` + upgrade headers.
+**Alternatives:** publish an order-service host-port range (rejected — multiple entry
+URLs, no single edge); Traefik/Envoy (rejected for now — heavier; nginx suffices);
+Docker Swarm/K8s Service VIP (rejected — out of scope, compose-only target).
