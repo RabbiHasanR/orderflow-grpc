@@ -5,6 +5,7 @@ lives in ``inventory_app.services``. Business outcomes (insufficient stock,
 unknown product, non-positive quantity) are returned as ``success=False`` with
 per-item reasons; gRPC error statuses are reserved for malformed requests.
 """
+import logging
 import queue
 import threading
 from collections.abc import Iterator
@@ -22,6 +23,10 @@ from inventory_app.services import (
     reserve_stock,
     stream_low_stock,
 )
+
+# Transport/stream-lifecycle logger (spec 013), shared with the interceptors.
+# Domain outcomes are logged one layer down on ``inventory.service``.
+logger = logging.getLogger("inventory.grpc")
 
 
 class InventoryServicer(pb2_grpc.InventoryServiceServicer):
@@ -96,6 +101,10 @@ class InventoryServicer(pb2_grpc.InventoryServiceServicer):
 
         for item in request_iterator:
             if not item.order_ref:
+                logger.warning(
+                    "ReserveStockBulk: dropping malformed line (product_id=%s, "
+                    "missing order_ref)", item.product_id,
+                )
                 results.append(
                     pb2.BulkItemOutcome(
                         order_ref=item.order_ref,
@@ -122,6 +131,10 @@ class InventoryServicer(pb2_grpc.InventoryServiceServicer):
                 )
             )
 
+        logger.info(
+            "ReserveStockBulk summary: %d line(s), %d reserved, %d failed",
+            len(results), reserved_count, len(results) - reserved_count,
+        )
         return pb2.BulkReserveSummary(
             total=len(results),
             reserved_count=reserved_count,
@@ -186,6 +199,9 @@ class InventoryServicer(pb2_grpc.InventoryServiceServicer):
         is set when the request stream ends or the client cancels
         (``context.is_active()`` goes False), unblocking both helper threads.
         """
+        peer = context.peer()
+        logger.info("WatchStock stream opened peer=%s", peer)
+
         watch_set: set[int] = set()
         newly_added: set[int] = set()
         last_seen: dict[int, int] = {}
@@ -204,22 +220,37 @@ class InventoryServicer(pb2_grpc.InventoryServiceServicer):
                             watch_set.update(ids)
                             newly_added.update(ids)
                             events.put(("snapshot", None))  # emit initial values
+                            logger.info(
+                                "WatchStock subscribe peer=%s ids=%s (watching %d)",
+                                peer, sorted(ids), len(watch_set),
+                            )
                         else:  # UNSUBSCRIBE
                             watch_set.difference_update(ids)
                             newly_added.difference_update(ids)
+                            logger.info(
+                                "WatchStock unsubscribe peer=%s ids=%s (watching %d)",
+                                peer, sorted(ids), len(watch_set),
+                            )
+            except Exception:
+                # Don't die silently — a crashed reader would freeze the watch set.
+                logger.exception("WatchStock reader thread failed peer=%s", peer)
             finally:
                 stop.set()  # request stream closed → end the watch
 
         def _drain_notifications() -> None:
             """Turn Postgres NOTIFYs into queue markers for watched products."""
-            for event in listen_stock_changes(stop, tick):
-                if event.kind == "resync":
-                    events.put(("resync", None))
-                    continue
-                with lock:
-                    watched = event.product_id in watch_set
-                if watched:  # ignore changes to products nobody here is watching
-                    events.put(("changed", event.product_id))
+            try:
+                for event in listen_stock_changes(stop, tick):
+                    if event.kind == "resync":
+                        events.put(("resync", None))
+                        continue
+                    with lock:
+                        watched = event.product_id in watch_set
+                    if watched:  # ignore changes to products nobody here is watching
+                        events.put(("changed", event.product_id))
+            except Exception:
+                logger.exception("WatchStock listener thread failed peer=%s", peer)
+                stop.set()  # can't receive updates anymore → end the watch
 
         reader = threading.Thread(target=_drain_commands, daemon=True)
         listener = threading.Thread(target=_drain_notifications, daemon=True)
@@ -271,3 +302,4 @@ class InventoryServicer(pb2_grpc.InventoryServiceServicer):
         finally:
             stop.set()  # unblock the reader + listener threads
             listener.join(timeout=tick * 2)  # let its DB connection close promptly
+            logger.info("WatchStock stream closed peer=%s", peer)

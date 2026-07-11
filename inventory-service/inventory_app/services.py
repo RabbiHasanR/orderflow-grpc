@@ -6,6 +6,7 @@ concurrent orders cannot both read the same quantity and oversell. Reservation
 is all-or-nothing: any unsatisfiable line rolls back the whole batch, but a
 per-item breakdown is still returned.
 """
+import logging
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 
@@ -13,6 +14,10 @@ from django.db import IntegrityError, transaction
 from django.db.models import F
 
 from .models import Product, StockReservation
+
+# Domain-event logger (spec 013). Distinct from ``inventory.grpc`` (transport):
+# this narrates *what the business did*, mirroring order-service's log style.
+logger = logging.getLogger("inventory.service")
 
 
 @dataclass(frozen=True)
@@ -104,6 +109,10 @@ def reserve_stock(
             )
         )
         if prior:
+            logger.info(
+                "reserve %s: idempotent replay (key=%s, %d lines)",
+                order_ref, idempotency_key, len(prior),
+            )
             return ReservationOutcome(
                 success=True,
                 results=[ItemOutcome(r.product_id, True) for r in prior],
@@ -162,6 +171,10 @@ def reserve_stock(
         # A concurrent duplicate (same key + product) won the unique index race;
         # this transaction rolled back so no stock moved. Report failure — the
         # caller's retry replays the winner's committed outcome above.
+        logger.warning(
+            "reserve %s: concurrent duplicate lost the unique-index race (key=%s)",
+            order_ref, idempotency_key,
+        )
         return ReservationOutcome(
             success=False,
             results=[
@@ -170,6 +183,13 @@ def reserve_stock(
             ],
         )
 
+    if all_ok:
+        logger.info("reserved order %s: %d line(s)", order_ref, len(outcomes))
+    else:
+        reasons = "; ".join(
+            f"{o.product_id}:{o.reason}" for o in outcomes if not o.reserved
+        )
+        logger.warning("reserve %s rejected: %s", order_ref, reasons)
     return ReservationOutcome(success=all_ok, results=outcomes)
 
 
@@ -204,6 +224,10 @@ def release_stock(order_ref: str) -> ReleaseOutcome:
             reservation.status = StockReservation.Status.RELEASED
             reservation.save(update_fields=["status"])
 
+    if reservations:
+        logger.info("released order %s: %d line(s)", order_ref, len(reservations))
+    else:
+        logger.info("release %s: nothing reserved — no-op", order_ref)
     return ReleaseOutcome(released=bool(reservations), released_count=len(reservations))
 
 
@@ -234,6 +258,9 @@ def stream_low_stock(
     Yields:
         One :class:`ProductStockRow` per matching product, ordered by SKU.
     """
+    logger.info(
+        "low-stock scan: threshold=%d prefix=%r", threshold, sku_prefix or "",
+    )
     products = Product.objects.filter(available_quantity__lte=threshold)
     if sku_prefix:
         products = products.filter(sku__startswith=sku_prefix)

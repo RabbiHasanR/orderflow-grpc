@@ -45,6 +45,41 @@ DATABASES = {
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+# --- Logging -------------------------------------------------------------------
+
+# Single source of truth for level + format (spec 013). Mirrors order-service's
+# format so a combined `docker compose logs` reads consistently across services.
+# ``serve()`` still calls ``basicConfig`` as a guard for the pre-``django.setup()``
+# window; once Django is configured this dict wins. Two namespaces:
+#   inventory.grpc    — transport / stream lifecycle (interceptors + servicer)
+#   inventory.service — domain events (service layer)
+# Later (spec 010) the console formatter swaps to structured JSON — a config
+# change here, not a code change at the call sites.
+_LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "standard": {
+            "format": "%(asctime)s %(levelname)s %(name)s: %(message)s",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "standard",
+        },
+    },
+    "loggers": {
+        "inventory": {
+            "handlers": ["console"],
+            "level": _LOG_LEVEL,
+            "propagate": False,
+        },
+    },
+}
+
 # --- I18N / TZ -----------------------------------------------------------------
 
 LANGUAGE_CODE = "en-us"

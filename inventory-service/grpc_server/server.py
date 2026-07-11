@@ -20,6 +20,8 @@ _SHUTDOWN_GRACE = 10
 
 def serve() -> None:
     """Bootstrap Django, build the gRPC server, and serve until terminated."""
+    # Fallback for the pre-``django.setup()`` window; once Django loads, its
+    # LOGGING dict (settings.py, spec 013) configures the ``inventory`` loggers.
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "inventory_project.settings")
