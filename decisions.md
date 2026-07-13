@@ -485,3 +485,30 @@ Streaming (NDJSON `/inventory/low-stock`, WS `/inventory/stock-watch`) is preser
 **Alternatives:** publish an order-service host-port range (rejected — multiple entry
 URLs, no single edge); Traefik/Envoy (rejected for now — heavier; nginx suffices);
 Docker Swarm/K8s Service VIP (rejected — out of scope, compose-only target).
+
+### D-044 — HAProxy edge for true per-request balancing (branch `feat/haproxy-edge`)
+
+**Date:** 2026-07-13
+**Decision:** On branch `feat/haproxy-edge`, replace the nginx edge (D-043) with
+**HAProxy** (`haproxy:3.0-alpine`) as the single published `:8000` edge, to mock a
+real-deployment load balancer. HAProxy keeps a **live, health-checked pool** of
+order-service replicas and does **per-request** `roundrobin`, versus nginx's
+~5s DNS-cache pinning. See [spec 014](specs/014-haproxy-per-request-edge.md).
+**Why:** nginx's variable-`proxy_pass` + Docker-DNS pattern (D-043) only re-resolves
+per the resolver TTL, so balancing is at DNS-refresh granularity and a burst can hit
+one replica; nginx also ran **no app-level health check**. A real LB balances every
+request across a pool it actively health-checks.
+**Why `server-template` + Docker DNS (not a static `server` list):** `server-template
+order 4 order-service:8000 check resolvers docker` pre-provisions 4 slots continuously
+re-resolved from the service record set, so `--scale order-service=N` (N≤4) is picked
+up within a DNS TTL with no restart. `option httpchk GET /healthz` drains sick slots.
+`hold valid 5s` bounds DISCOVERY only — request-level balancing across the live pool
+is instant, unlike nginx where 5s governed balancing itself.
+**Scope:** REST edge only (client → order-service). gRPC→inventory balancing is
+unchanged (client-side round-robin, D-026). Streaming preserved via `timeout
+client/server/tunnel 1h` + HTTP-mode WebSocket upgrade handling.
+**Trade-off:** slot count is a fixed ceiling (4 — raise for larger scale). `master`
+keeps the nginx edge (D-043); this is a branch-scoped alternative, not a merge to main.
+**Alternatives:** Traefik (Docker-label auto-discovery — rejected: reads Docker socket,
+more magic); Envoy (most mesh-faithful, gRPC-aware — deferred: heavier, and gRPC-edge
+balancing is out of this spec's scope).

@@ -27,5 +27,6 @@ IDs are zero-padded 3-digit, mirroring the `D-NNN` scheme in `decisions.md`.
 | [011](011-security-config-hardening.md) | Security & config hardening | both | draft | Phase 5: fail-closed auth, required `DJANGO_SECRET_KEY`/`ALLOWED_HOSTS`, `.env.example`, resource limits, TLS at nginx |
 | [012](012-automated-tests.md) | Automated tests | both | draft | Phase 6: concurrency/idempotency/release unit tests + compose integration smoke + CI |
 | [013](013-inventory-app-logging.md) | Inventory-service application & stream logging | inventory-service | in-progress | Plain-stdlib business logs (`inventory.service`) + WatchStock subscribe/unsubscribe logging + Django `LOGGING` dict; precursor to [010](010-observability.md) |
+| [014](014-haproxy-per-request-edge.md) | HAProxy per-request load-balancing edge | order-service | in-progress | Replaces nginx edge with HAProxy for TRUE per-request round-robin + active health checks over `--scale`d order-service replicas (D-044); branch `feat/haproxy-edge` |
 
-<!-- Next free ID: 014 -->
+<!-- Next free ID: 015 -->
