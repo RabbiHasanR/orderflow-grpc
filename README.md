@@ -31,6 +31,8 @@ database.
                             └───────────┘                              └───────────────┘
 ```
 
+![OrderFlow system design — request steps and RPCs](orderflow_system_with_steps_and_rpcs.png)
+
 - **order-service** (FastAPI) — the only host-published entrypoint (`:8000`);
   translates REST/WebSocket into gRPC calls.
 - **inventory-service** (Django) — internal gRPC server on `:50051`, run as two
